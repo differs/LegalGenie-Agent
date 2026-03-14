@@ -22,7 +22,7 @@ async fn smoke_flow_creates_audit_logs() {
         json!({
             "username": "testuser",
             "email": "testuser@example.com",
-            "password": "password123",
+            "password": "Password123",
         }),
     )
     .await;
@@ -266,7 +266,7 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         asr_threads: 1,
     };
 
-    let state = AppState { config: cfg, pool };
+    let state = AppState::new(cfg, pool);
     (router(state), tmp)
 }
 

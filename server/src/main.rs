@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("run migrations")?;
 
-    let state = AppState { config, pool };
+    let state = AppState::new(config, pool);
     let app = router(state.clone());
 
     let addr = state.config.bind_addr();

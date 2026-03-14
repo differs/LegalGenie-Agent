@@ -6,6 +6,7 @@ mod db;
 mod errors;
 mod oplog;
 mod parser;
+mod rate_limit;
 mod routes;
 mod state;
 

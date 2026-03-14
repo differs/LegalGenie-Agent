@@ -14,6 +14,9 @@ pub enum AppError {
     BadRequest { message: String, error_code: i32 },
 
     #[error("{message}")]
+    TooManyRequests { message: String, error_code: i32 },
+
+    #[error("{message}")]
     Unauthorized { message: String, error_code: i32 },
 
     #[error("{message}")]
@@ -34,6 +37,14 @@ impl AppError {
         Self::BadRequest {
             message: message.into(),
             error_code: 400000,
+        }
+    }
+
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        // Align with docs: AUTH_TOO_MANY_ATTEMPTS (400104)
+        Self::TooManyRequests {
+            message: message.into(),
+            error_code: 400104,
         }
     }
 
@@ -80,6 +91,10 @@ impl IntoResponse for AppError {
                 message,
                 error_code,
             } => (StatusCode::BAD_REQUEST, message, error_code),
+            AppError::TooManyRequests {
+                message,
+                error_code,
+            } => (StatusCode::TOO_MANY_REQUESTS, message, error_code),
             AppError::Unauthorized {
                 message,
                 error_code,

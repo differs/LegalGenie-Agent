@@ -19,6 +19,7 @@ use jsonwebtoken::{
 };
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -107,9 +108,7 @@ fn build_refresh_claims(user_id: Uuid, expire_days: i64) -> Claims {
 }
 
 fn hash_password(password: &str) -> AppResult<String> {
-    if password.len() < 8 {
-        return Err(AppError::bad_request("password too short (min 8 chars)"));
-    }
+    validate_password_strength(password)?;
 
     let salt = SaltString::generate(&mut OsRng);
     let params = Params::new(19_456, 2, 1, None)
@@ -121,6 +120,37 @@ fn hash_password(password: &str) -> AppResult<String> {
         .map_err(|e| AppError::internal(format!("password hash failed: {e}")))?;
 
     Ok(hash.to_string())
+}
+
+fn validate_password_strength(password: &str) -> AppResult<()> {
+    let p = password;
+    if p.len() < 8 {
+        return Err(AppError::bad_request("password too short (min 8 chars)"));
+    }
+
+    if !p.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(AppError::bad_request(
+            "password too weak (must include uppercase letter)",
+        ));
+    }
+    if !p.chars().any(|c| c.is_ascii_lowercase()) {
+        return Err(AppError::bad_request(
+            "password too weak (must include lowercase letter)",
+        ));
+    }
+    if !p.chars().any(|c| c.is_ascii_digit()) {
+        return Err(AppError::bad_request(
+            "password too weak (must include a digit)",
+        ));
+    }
+
+    let weak = ["123456", "password", "12345678", "qwerty"];
+    let lower = p.to_ascii_lowercase();
+    if weak.iter().any(|w| *w == lower.as_str()) {
+        return Err(AppError::bad_request("password too weak"));
+    }
+
+    Ok(())
 }
 
 fn verify_password(password: &str, password_hash: &str) -> AppResult<bool> {
@@ -303,6 +333,18 @@ async fn login(
     let ident = req.username.trim();
     if ident.is_empty() || req.password.is_empty() {
         return Err(AppError::bad_request("username/password required"));
+    }
+
+    let ip = meta.ip_address.as_deref().unwrap_or("unknown").to_string();
+    let key = format!("login:{}:{}", ip, ident.to_ascii_lowercase());
+    let allowed = state
+        .rate_limiter
+        .check_and_record(&key, 5, StdDuration::from_secs(15 * 60))
+        .await;
+    if !allowed {
+        return Err(AppError::too_many_requests(
+            "too many login attempts, please try again later",
+        ));
     }
 
     let user: Option<UserRow> = sqlx::query_as(
@@ -500,10 +542,6 @@ async fn change_password(
     meta: RequestMeta,
     Json(req): Json<ChangePasswordRequest>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
-    if req.new_password.len() < 8 {
-        return Err(AppError::bad_request("password too short (min 8 chars)"));
-    }
-
     let row: Option<(String,)> =
         sqlx::query_as("SELECT password_hash FROM users WHERE id = ?1 LIMIT 1")
             .bind(user.user_id.to_string())
