@@ -1,19 +1,5 @@
-mod access;
-mod api;
-mod config;
-mod context;
-mod db;
-mod errors;
-mod oplog;
-mod parser;
-mod routes;
-mod state;
-
-use crate::config::AppConfig;
-use crate::db::create_pool;
-use crate::routes::router;
-use crate::state::AppState;
 use anyhow::Context;
+use legalminds_server::{create_pool, router, AppConfig, AppState};
 use std::net::SocketAddr;
 
 #[tokio::main]

@@ -25,3 +25,8 @@ uuid.workspace = true
 whisper-rs.workspace = true
 
 legalminds-shared = { path = "../shared" }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

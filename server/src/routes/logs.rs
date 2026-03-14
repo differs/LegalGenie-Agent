@@ -364,7 +364,6 @@ fn apply_filters(
         qb.push("))");
         qb.push("))");
         qb.push(")");
-        qb.push(")");
     }
 
     if let Some(user_id) = user_id {

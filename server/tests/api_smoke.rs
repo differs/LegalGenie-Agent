@@ -1,0 +1,312 @@
+use axum::body::Body;
+use axum::http::{header, Method, Request, StatusCode};
+use http_body_util::BodyExt;
+use legalminds_server::{router, AppConfig, AppState, CorsOrigins};
+use serde_json::json;
+use sqlx::sqlite::SqlitePoolOptions;
+use std::time::Duration;
+use tempfile::TempDir;
+use tower::util::ServiceExt;
+
+#[tokio::test]
+async fn smoke_flow_creates_audit_logs() {
+    let (app, _tmp) = build_test_app().await;
+
+    // Register (also returns tokens).
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "testuser",
+            "email": "testuser@example.com",
+            "password": "password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Create case.
+    let case_resp = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/cases",
+        Some(&token),
+        json!({
+            "name": "Test Case",
+            "description": "desc",
+            "tags": ["t1", "t2"],
+        }),
+    )
+    .await;
+    assert_eq!(case_resp.0, StatusCode::OK);
+    let case_id = case_resp.1["data"]["id"]
+        .as_str()
+        .expect("case id")
+        .to_string();
+
+    // Create timeline node.
+    let node_resp = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/cases/{case_id}/timeline/nodes"),
+        Some(&token),
+        json!({
+            "title": "Contract Signed",
+            "event_time": "2024-01-01",
+            "tags": ["important"],
+        }),
+    )
+    .await;
+    assert_eq!(node_resp.0, StatusCode::OK);
+    let node_id = node_resp.1["data"]["id"]
+        .as_str()
+        .expect("node id")
+        .to_string();
+
+    // Upload a small text file (no external parsers required).
+    let upload_resp = request_multipart_text(
+        &app,
+        &format!("/api/v1/cases/{case_id}/files"),
+        &token,
+        "note.txt",
+        "hello from tests\n",
+    )
+    .await;
+    assert_eq!(upload_resp.0, StatusCode::OK);
+    let evidence_id = upload_resp.1["data"]["id"]
+        .as_str()
+        .expect("evidence id")
+        .to_string();
+
+    // Link evidence to node.
+    let link_resp = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/timeline/nodes/{node_id}/evidence"),
+        Some(&token),
+        json!({
+            "evidence_id": evidence_id,
+            "anchor_type": "page",
+            "anchor_data": { "page_num": 1 },
+        }),
+    )
+    .await;
+    assert_eq!(link_resp.0, StatusCode::OK);
+
+    // Audit logs are inserted asynchronously; wait until they show up.
+    let logs = wait_for_case_logs(&app, &token, &case_id, 3).await;
+    assert_eq!(logs.0, StatusCode::OK);
+    let total = logs.1["data"]["total"].as_i64().unwrap_or(0);
+    assert!(total >= 3, "expected >=3 case logs, got {total}");
+
+    // Target history for the node should contain at least the CREATE action.
+    let history = wait_for_target_history(&app, &token, "event_node", &node_id).await;
+    assert_eq!(history.0, StatusCode::OK);
+    let actions = history.1["data"]["history"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.get("action").and_then(|x| x.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        actions.iter().any(|a| *a == "CREATE"),
+        "expected CREATE in node history; got {actions:?}"
+    );
+}
+
+async fn build_test_app() -> (axum::Router, TempDir) {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite memory");
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .expect("pragma foreign_keys");
+
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate");
+
+    let tmp = TempDir::new().expect("tempdir");
+    let storage_path = tmp.path().join("storage");
+    let temp_path = storage_path.join("temp");
+    let tessdata_dir = tmp.path().join("tessdata");
+
+    tokio::fs::create_dir_all(&storage_path)
+        .await
+        .expect("create storage");
+    tokio::fs::create_dir_all(&temp_path)
+        .await
+        .expect("create temp");
+    tokio::fs::create_dir_all(&tessdata_dir)
+        .await
+        .expect("create tessdata");
+
+    let cfg = AppConfig {
+        server_host: "127.0.0.1".to_string(),
+        server_port: 0,
+        database_url: "sqlite::memory:".to_string(),
+        cors_origins: CorsOrigins::Any,
+        jwt_secret: "test-secret-please-change".to_string(),
+        access_token_expire_minutes: 60,
+        refresh_token_expire_days: 7,
+        storage_path: storage_path.to_string_lossy().to_string(),
+        max_file_size: 10 * 1024 * 1024,
+        temp_path: temp_path.to_string_lossy().to_string(),
+        tessdata_dir: tessdata_dir.to_string_lossy().to_string(),
+        whisper_model_path: tmp.path().join("whisper.bin").to_string_lossy().to_string(),
+        asr_language: "zh".to_string(),
+        asr_threads: 1,
+    };
+
+    let state = AppState { config: cfg, pool };
+    (router(state), tmp)
+}
+
+async fn request_json(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    bearer: Option<&str>,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = bearer {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let req = builder
+        .body(Body::from(body.to_string()))
+        .expect("build request");
+
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    (status, json)
+}
+
+async fn request_multipart_text(
+    app: &axum::Router,
+    uri: &str,
+    bearer: &str,
+    filename: &str,
+    content: &str,
+) -> (StatusCode, serde_json::Value) {
+    let boundary = "XBOUNDARY";
+    let body = format!(
+        "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+{content}\r\n\
+--{boundary}--\r\n"
+    );
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .body(Body::from(body))
+        .expect("build request");
+
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    (status, json)
+}
+
+async fn wait_for_case_logs(
+    app: &axum::Router,
+    bearer: &str,
+    case_id: &str,
+    min_total: i64,
+) -> (StatusCode, serde_json::Value) {
+    for _ in 0..20 {
+        let resp = request_json(
+            app,
+            Method::GET,
+            &format!("/api/v1/logs?case_id={case_id}"),
+            Some(bearer),
+            json!({}),
+        )
+        .await;
+        let total = resp.1["data"]["total"].as_i64().unwrap_or(0);
+        if resp.0 == StatusCode::OK && total >= min_total {
+            return resp;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    request_json(
+        app,
+        Method::GET,
+        &format!("/api/v1/logs?case_id={case_id}"),
+        Some(bearer),
+        json!({}),
+    )
+    .await
+}
+
+async fn wait_for_target_history(
+    app: &axum::Router,
+    bearer: &str,
+    target_type: &str,
+    target_id: &str,
+) -> (StatusCode, serde_json::Value) {
+    for _ in 0..20 {
+        let resp = request_json(
+            app,
+            Method::GET,
+            &format!("/api/v1/logs/{target_type}/{target_id}/history"),
+            Some(bearer),
+            json!({}),
+        )
+        .await;
+        let history_len = resp.1["data"]["history"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if resp.0 == StatusCode::OK && history_len > 0 {
+            return resp;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    request_json(
+        app,
+        Method::GET,
+        &format!("/api/v1/logs/{target_type}/{target_id}/history"),
+        Some(bearer),
+        json!({}),
+    )
+    .await
+}
