@@ -434,6 +434,184 @@ async fn upload_over_2mb_is_allowed() {
     );
 }
 
+#[tokio::test]
+async fn office_files_produce_parsed_artifacts() {
+    let (app, _tmp) = build_test_app().await;
+
+    // Register (also returns tokens).
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "officeuser",
+            "email": "officeuser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Create case.
+    let case_resp = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/cases",
+        Some(&token),
+        json!({
+            "name": "Office Parse Case",
+        }),
+    )
+    .await;
+    assert_eq!(case_resp.0, StatusCode::OK);
+    let case_id = case_resp.1["data"]["id"]
+        .as_str()
+        .expect("case id")
+        .to_string();
+
+    // Upload XLSX and verify parsed artifact.
+    let xlsx = make_test_xlsx_bytes();
+    let upload_xlsx = request_multipart_bytes(
+        &app,
+        &format!("/api/v1/cases/{case_id}/files"),
+        &token,
+        "table.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        &xlsx,
+    )
+    .await;
+    assert_eq!(upload_xlsx.0, StatusCode::OK);
+    let xlsx_id = upload_xlsx.1["data"]["id"]
+        .as_str()
+        .expect("xlsx evidence id")
+        .to_string();
+
+    let xlsx_detail = wait_for_file_parse_done(&app, &token, &xlsx_id).await;
+    assert_eq!(xlsx_detail.0, StatusCode::OK);
+    assert_eq!(
+        xlsx_detail.1["data"]["parse_status"].as_str().unwrap_or(""),
+        "done"
+    );
+
+    let xlsx_parsed = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{xlsx_id}/parsed"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(xlsx_parsed.0, StatusCode::OK);
+    let ct = xlsx_parsed
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/json"),
+        "expected application/json content-type, got {ct}"
+    );
+    let xlsx_json: serde_json::Value =
+        serde_json::from_slice(&xlsx_parsed.2).expect("xlsx parsed json");
+    assert_eq!(xlsx_json["case_id"].as_str().unwrap_or(""), case_id);
+    assert_eq!(xlsx_json["evidence_id"].as_str().unwrap_or(""), xlsx_id);
+    assert_eq!(xlsx_json["kind"].as_str().unwrap_or(""), "excel");
+    let xlsx_text = xlsx_json["parsed_text"].as_str().unwrap_or("");
+    assert!(xlsx_text.contains("Alpha"), "expected Alpha in parsed xlsx");
+    assert!(xlsx_text.contains("Beta"), "expected Beta in parsed xlsx");
+    assert!(
+        xlsx_json["extra"]["sheet_names"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            == Some(true),
+        "expected extra.sheet_names to be a non-empty array"
+    );
+
+    // Upload DOCX and verify parsed artifact.
+    let docx = make_test_docx_bytes("Hello DOCX");
+    let upload_docx = request_multipart_bytes(
+        &app,
+        &format!("/api/v1/cases/{case_id}/files"),
+        &token,
+        "doc.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        &docx,
+    )
+    .await;
+    assert_eq!(upload_docx.0, StatusCode::OK);
+    let docx_id = upload_docx.1["data"]["id"]
+        .as_str()
+        .expect("docx evidence id")
+        .to_string();
+
+    let docx_detail = wait_for_file_parse_done(&app, &token, &docx_id).await;
+    assert_eq!(docx_detail.0, StatusCode::OK);
+    assert_eq!(
+        docx_detail.1["data"]["parse_status"].as_str().unwrap_or(""),
+        "done"
+    );
+
+    let docx_parsed = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{docx_id}/parsed"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(docx_parsed.0, StatusCode::OK);
+    let docx_json: serde_json::Value =
+        serde_json::from_slice(&docx_parsed.2).expect("docx parsed json");
+    assert_eq!(docx_json["case_id"].as_str().unwrap_or(""), case_id);
+    assert_eq!(docx_json["evidence_id"].as_str().unwrap_or(""), docx_id);
+    assert_eq!(docx_json["kind"].as_str().unwrap_or(""), "docx");
+    let docx_text = docx_json["parsed_text"].as_str().unwrap_or("");
+    assert!(
+        docx_text.contains("Hello DOCX"),
+        "expected docx parsed text to contain content"
+    );
+
+    // Upload legacy DOC and verify it fails (unsupported) and has no parsed artifact.
+    let upload_doc = request_multipart_bytes(
+        &app,
+        &format!("/api/v1/cases/{case_id}/files"),
+        &token,
+        "legacy.doc",
+        "application/msword",
+        b"not a real doc",
+    )
+    .await;
+    assert_eq!(upload_doc.0, StatusCode::OK);
+    let doc_id = upload_doc.1["data"]["id"]
+        .as_str()
+        .expect("doc evidence id")
+        .to_string();
+
+    let doc_detail = wait_for_file_parse_failed(&app, &token, &doc_id).await;
+    assert_eq!(doc_detail.0, StatusCode::OK);
+    assert_eq!(
+        doc_detail.1["data"]["parse_status"].as_str().unwrap_or(""),
+        "failed"
+    );
+    let err = doc_detail.1["data"]["parse_error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("not supported") || err.contains(".doc"),
+        "expected parse_error to mention unsupported doc, got: {err}"
+    );
+
+    let doc_parsed = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{doc_id}/parsed"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(doc_parsed.0, StatusCode::NOT_FOUND);
+}
+
 async fn build_test_app() -> (axum::Router, TempDir) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -477,7 +655,13 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         refresh_token_expire_days: 7,
         storage_path: storage_path.to_string_lossy().to_string(),
         max_file_size: 10 * 1024 * 1024,
-        allowed_file_types: vec!["txt".to_string(), "json".to_string()],
+        allowed_file_types: vec![
+            "txt".to_string(),
+            "json".to_string(),
+            "xlsx".to_string(),
+            "docx".to_string(),
+            "doc".to_string(),
+        ],
         temp_path: temp_path.to_string_lossy().to_string(),
         tessdata_dir: tessdata_dir.to_string_lossy().to_string(),
         whisper_model_path: tmp.path().join("whisper.bin").to_string_lossy().to_string(),
@@ -535,6 +719,51 @@ Content-Type: text/plain\r\n\
 {content}\r\n\
 --{boundary}--\r\n"
     );
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .body(Body::from(body))
+        .expect("build request");
+
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    (status, json)
+}
+
+async fn request_multipart_bytes(
+    app: &axum::Router,
+    uri: &str,
+    bearer: &str,
+    filename: &str,
+    content_type: &str,
+    content: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    let boundary = "XBOUNDARY";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+Content-Type: {content_type}\r\n\
+\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(content);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
     let req = Request::builder()
         .method(Method::POST)
@@ -655,6 +884,23 @@ async fn wait_for_file_parse_done(
     bearer: &str,
     file_id: &str,
 ) -> (StatusCode, serde_json::Value) {
+    wait_for_file_parse_status(app, bearer, file_id, "done").await
+}
+
+async fn wait_for_file_parse_failed(
+    app: &axum::Router,
+    bearer: &str,
+    file_id: &str,
+) -> (StatusCode, serde_json::Value) {
+    wait_for_file_parse_status(app, bearer, file_id, "failed").await
+}
+
+async fn wait_for_file_parse_status(
+    app: &axum::Router,
+    bearer: &str,
+    file_id: &str,
+    expected: &str,
+) -> (StatusCode, serde_json::Value) {
     for _ in 0..50 {
         let resp = request_json(
             app,
@@ -665,7 +911,7 @@ async fn wait_for_file_parse_done(
         )
         .await;
         let status = resp.1["data"]["parse_status"].as_str().unwrap_or("");
-        if resp.0 == StatusCode::OK && status == "done" {
+        if resp.0 == StatusCode::OK && status == expected {
             return resp;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -679,4 +925,46 @@ async fn wait_for_file_parse_done(
         json!({}),
     )
     .await
+}
+
+fn make_test_xlsx_bytes() -> Vec<u8> {
+    use rust_xlsxwriter::Workbook;
+
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+
+    worksheet
+        .write_string(0, 0, "Alpha")
+        .expect("write xlsx cell");
+    worksheet
+        .write_string(0, 1, "Beta")
+        .expect("write xlsx cell");
+
+    workbook.save_to_buffer().expect("save xlsx to buffer")
+}
+
+fn make_test_docx_bytes(text: &str) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    // Minimal docx-like zip payload: we only need word/document.xml for our parser.
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>{text}</w:t></w:r></w:p>
+  </w:body>
+</w:document>
+"#
+    );
+
+    let cursor = Cursor::new(Vec::new());
+    let mut zip = ZipWriter::new(cursor);
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    zip.start_file("word/document.xml", opts)
+        .expect("start docx document.xml");
+    zip.write_all(xml.as_bytes()).expect("write docx xml");
+    let cursor = zip.finish().expect("finish docx zip");
+    cursor.into_inner()
 }
