@@ -13,11 +13,14 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::NaiveDate;
+use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfSaveOptions, PdfWarnMsg};
 use resvg::{tiny_skia, usvg};
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
@@ -26,6 +29,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/:case_id/exports/evidence-list", get(export_evidence_list))
         .route("/:case_id/exports/timeline", get(export_timeline))
+        .route(
+            "/:case_id/exports/timeline-report",
+            get(export_timeline_report),
+        )
         .route("/:case_id/exports/history", get(export_history))
         .route(
             "/:case_id/exports/:export_id/download",
@@ -53,6 +60,16 @@ fn default_page_size() -> i64 {
 struct TimelineExportQuery {
     #[serde(default)]
     format: Option<String>,
+    #[serde(default)]
+    start_date: Option<String>,
+    #[serde(default)]
+    end_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TimelineReportQuery {
+    #[serde(default)]
+    format: Option<String>, // pdf/html
     #[serde(default)]
     start_date: Option<String>,
     #[serde(default)]
@@ -426,12 +443,16 @@ async fn download_export(
     let file_name_lc = file_name.to_ascii_lowercase();
     let content_type = if file_name_lc.ends_with(".csv") {
         HeaderValue::from_static("text/csv; charset=utf-8")
+    } else if file_name_lc.ends_with(".html") || file_name_lc.ends_with(".htm") {
+        HeaderValue::from_static("text/html; charset=utf-8")
     } else if file_name_lc.ends_with(".xlsx") {
         HeaderValue::from_static(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     } else if file_name_lc.ends_with(".png") {
         HeaderValue::from_static("image/png")
+    } else if file_name_lc.ends_with(".pdf") {
+        HeaderValue::from_static("application/pdf")
     } else {
         HeaderValue::from_static("application/octet-stream")
     };
@@ -635,12 +656,275 @@ async fn export_timeline(
     Ok(resp)
 }
 
+async fn export_timeline_report(
+    State(state): State<AppState>,
+    user: AuthUser,
+    meta: RequestMeta,
+    Path(case_id): Path<String>,
+    Query(q): Query<TimelineReportQuery>,
+) -> AppResult<Response> {
+    let case_id = normalize_uuid(&case_id, "invalid case_id")?;
+    ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+
+    let fmt = q
+        .format
+        .as_deref()
+        .unwrap_or("pdf")
+        .trim()
+        .to_ascii_lowercase();
+
+    if fmt != "pdf" && fmt != "html" {
+        return Err(AppError::bad_request(
+            "only format=pdf or format=html is supported",
+        ));
+    }
+
+    let (start, end) = parse_date_range(q.start_date.as_deref(), q.end_date.as_deref())?;
+
+    let case_name: Option<String> = sqlx::query_scalar("SELECT name FROM cases WHERE id = ?1")
+        .bind(&case_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+    let Some(case_name) = case_name else {
+        return Err(AppError::not_found("case not found"));
+    };
+
+    const MAX_NODES: usize = 200;
+    let nodes: Vec<TimelineReportNodeRow> = {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            r#"
+            SELECT
+              n.id,
+              n.title,
+              n.description,
+              n.event_time,
+              (
+                SELECT COUNT(1)
+                FROM node_evidence_links l
+                JOIN evidence_files e ON e.id = l.evidence_id AND e.status != 'deleted'
+                WHERE l.node_id = n.id
+              ) AS evidence_count
+            FROM event_nodes n
+            WHERE n.case_id =
+            "#,
+        );
+        qb.push_bind(&case_id);
+        qb.push(" AND n.status != 'deleted'");
+        if let Some(start) = start {
+            qb.push(" AND n.event_time >= ");
+            qb.push_bind(start.to_string());
+        }
+        if let Some(end) = end {
+            qb.push(" AND n.event_time <= ");
+            qb.push_bind(end.to_string());
+        }
+        qb.push(" ORDER BY n.event_time ASC, n.sort_order ASC LIMIT ");
+        qb.push_bind((MAX_NODES + 1) as i64);
+
+        qb.build_query_as::<TimelineReportNodeRow>()
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| AppError::internal(format!("db error: {e}")))?
+    };
+
+    if nodes.len() > MAX_NODES {
+        return Err(AppError::bad_request(
+            "too many nodes to export; please narrow by start_date/end_date",
+        ));
+    }
+
+    let node_ids = nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+    let evidence_ids = fetch_evidence_ids_for_nodes(&state, &node_ids).await?;
+
+    let timeline_nodes = nodes
+        .iter()
+        .map(|n| TimelineNodeExportRow {
+            id: n.id.clone(),
+            title: n.title.clone(),
+            description: n.description.clone(),
+            event_time: n.event_time.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    // Reuse the same SVG timeline renderer for the report cover image.
+    const WIDTH: u32 = 1400;
+    const HEADER_H: u32 = 140;
+    const ROW_H: u32 = 72;
+    const FOOTER_H: u32 = 80;
+    const MAX_HEIGHT: u32 = 20_000;
+    let rows = (timeline_nodes.len().max(1)) as u32;
+    let height = HEADER_H + (ROW_H * rows) + FOOTER_H;
+    if height > MAX_HEIGHT {
+        return Err(AppError::bad_request(
+            "export result too large; please narrow by start_date/end_date",
+        ));
+    }
+
+    let svg = build_timeline_svg(
+        WIDTH,
+        height,
+        &case_name,
+        &user.username,
+        &timeline_nodes,
+        start,
+        end,
+    );
+    let timeline_png = render_svg_png(&svg, WIDTH, height)?;
+
+    let generated_at = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
+    let report_title = format!("{} - 时间轴报告", case_name);
+
+    let (bytes, content_type, file_ext) = if fmt == "html" {
+        let data_url = format!("data:image/png;base64,{}", STANDARD.encode(&timeline_png));
+        let html = build_timeline_report_html(
+            &report_title,
+            &generated_at,
+            &user.username,
+            start,
+            end,
+            &nodes,
+            &data_url,
+        );
+        (
+            html.into_bytes(),
+            HeaderValue::from_static("text/html; charset=utf-8"),
+            "html",
+        )
+    } else {
+        let html = build_timeline_report_html(
+            &report_title,
+            &generated_at,
+            &user.username,
+            start,
+            end,
+            &nodes,
+            "timeline.png",
+        );
+        let mut images = BTreeMap::new();
+        images.insert(
+            "timeline.png".to_string(),
+            Base64OrRaw::Raw(timeline_png.clone()),
+        );
+        let pdf = render_html_to_pdf(&html, &images)?;
+        (pdf, HeaderValue::from_static("application/pdf"), "pdf")
+    };
+
+    let file_name = format!(
+        "{}_timeline_report_{}.{}",
+        case_id,
+        chrono::Utc::now().format("%Y%m%d_%H%M%S"),
+        file_ext
+    );
+    let storage_path = format!("exports/{}/{}", case_id, file_name);
+    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+
+    if let Some(parent) = full_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::internal(format!("create dir failed: {e}")))?;
+    }
+
+    tokio::fs::write(&full_path, &bytes)
+        .await
+        .map_err(|e| AppError::internal(format!("write export failed: {e}")))?;
+
+    let record_id = Uuid::new_v4().to_string();
+    let node_ids_json =
+        serde_json::to_string(&node_ids).map_err(|e| AppError::internal(format!("{e}")))?;
+    let evidence_ids_json = if evidence_ids.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&evidence_ids).map_err(|e| AppError::internal(format!("{e}")))?)
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO export_records (
+          id, case_id, export_type, file_name, storage_path, file_size, generated_by, node_ids, evidence_ids
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "#,
+    )
+    .bind(&record_id)
+    .bind(&case_id)
+    .bind("report")
+    .bind(&file_name)
+    .bind(&storage_path)
+    .bind(bytes.len() as i64)
+    .bind(user.user_id.to_string())
+    .bind(node_ids_json)
+    .bind(evidence_ids_json)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(case_id.clone()),
+            action: "EXPORT".to_string(),
+            module: "export".to_string(),
+            target_type: "export_record".to_string(),
+            target_id: Some(record_id),
+            target_title: Some(file_name.clone()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "export_type": "report",
+                "report_kind": "timeline_report",
+                "format": fmt,
+                "file_name": file_name,
+                "storage_path": storage_path,
+                "file_size": bytes.len(),
+                "node_count": node_ids.len(),
+                "evidence_count": evidence_ids.len(),
+                "start_date": start.map(|d| d.to_string()),
+                "end_date": end.map(|d| d.to_string()),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
+    let file = tokio::fs::File::open(&full_path)
+        .await
+        .map_err(|_| AppError::not_found("export not found"))?;
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+    let mut resp = Response::new(body);
+
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+
+    let cd = format!("attachment; filename=\"{}\"", sanitize_filename(&file_name));
+    if let Ok(v) = cd.parse::<HeaderValue>() {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+
+    Ok(resp)
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct TimelineNodeExportRow {
     id: String,
     title: String,
     description: Option<String>,
     event_time: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct TimelineReportNodeRow {
+    id: String,
+    title: String,
+    description: Option<String>,
+    event_time: String,
+    evidence_count: i64,
 }
 
 async fn fetch_evidence_ids_for_nodes(
@@ -889,6 +1173,128 @@ fn render_svg_png(svg: &str, width: u32, height: u32) -> AppResult<Vec<u8>> {
     pixmap
         .encode_png()
         .map_err(|e| AppError::internal(format!("encode png failed: {e}")))
+}
+
+fn build_timeline_report_html(
+    title: &str,
+    generated_at: &str,
+    username: &str,
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+    nodes: &[TimelineReportNodeRow],
+    timeline_img_src: &str,
+) -> String {
+    let mut range = String::new();
+    if let Some(s) = start {
+        range.push_str(&format!("start={}", s.format("%Y-%m-%d")));
+    }
+    if let Some(e) = end {
+        if !range.is_empty() {
+            range.push_str("  ");
+        }
+        range.push_str(&format!("end={}", e.format("%Y-%m-%d")));
+    }
+    if range.is_empty() {
+        range = "range=all".to_string();
+    }
+
+    let mut html = String::new();
+    html.push_str("<!doctype html><html><head><meta charset=\"utf-8\">");
+    html.push_str(&format!("<title>{}</title>", escape_html(title)));
+    html.push_str(
+        r#"<style>
+body{font-family:"Noto Sans CJK SC","Noto Sans CJK","DejaVu Sans",sans-serif;font-size:12pt;line-height:1.6;color:#111;margin:0;}
+.page{padding:24px;}
+h1{font-size:22pt;margin:0 0 8px 0;color:#0f172a;}
+.meta{font-size:10pt;color:#475569;margin:0 0 14px 0;}
+.meta span{margin-right:12px;}
+.timeline{width:100%;border:1px solid #e2e8f0;border-radius:8px;margin:10px 0 18px 0;}
+h2{font-size:14pt;margin:18px 0 10px 0;color:#1e293b;}
+table{width:100%;border-collapse:collapse;font-size:10pt;}
+th,td{border:1px solid #e2e8f0;padding:6px 8px;vertical-align:top;}
+th{background:#f8fafc;color:#0f172a;font-weight:700;}
+tr:nth-child(even){background:#f8fafb;}
+.col-date{width:110px;white-space:nowrap;}
+.col-ev{width:90px;white-space:nowrap;text-align:right;}
+.muted{color:#64748b;}
+</style></head><body>"#,
+    );
+
+    html.push_str("<div class=\"page\">");
+    html.push_str(&format!("<h1>{}</h1>", escape_html(title)));
+    html.push_str("<p class=\"meta\">");
+    html.push_str(&format!(
+        "<span>Generated at {}</span>",
+        escape_html(generated_at)
+    ));
+    html.push_str(&format!(
+        "<span>Generated by {}</span>",
+        escape_html(username)
+    ));
+    html.push_str(&format!(
+        "<span class=\"muted\">{}</span>",
+        escape_html(&range)
+    ));
+    html.push_str(&format!("<span>Nodes {}</span>", nodes.len().to_string()));
+    html.push_str("</p>");
+
+    html.push_str(&format!(
+        "<img class=\"timeline\" src=\"{}\" alt=\"timeline\" />",
+        escape_html(timeline_img_src)
+    ));
+
+    html.push_str("<h2>节点列表</h2>");
+    html.push_str("<table><thead><tr>");
+    html.push_str("<th class=\"col-date\">日期</th>");
+    html.push_str("<th>标题</th>");
+    html.push_str("<th>描述</th>");
+    html.push_str("<th class=\"col-ev\">证据数</th>");
+    html.push_str("</tr></thead><tbody>");
+
+    for n in nodes {
+        let desc = n.description.as_deref().unwrap_or("");
+        html.push_str("<tr>");
+        html.push_str(&format!(
+            "<td class=\"col-date\">{}</td>",
+            escape_html(&n.event_time)
+        ));
+        html.push_str(&format!("<td>{}</td>", escape_html(&n.title)));
+        html.push_str(&format!("<td>{}</td>", escape_html(desc)));
+        html.push_str(&format!("<td class=\"col-ev\">{}</td>", n.evidence_count));
+        html.push_str("</tr>");
+    }
+
+    html.push_str("</tbody></table>");
+    html.push_str("</div></body></html>");
+    html
+}
+
+fn render_html_to_pdf(html: &str, images: &BTreeMap<String, Base64OrRaw>) -> AppResult<Vec<u8>> {
+    let fonts: BTreeMap<String, Base64OrRaw> = BTreeMap::new();
+    let options = GeneratePdfOptions {
+        margin_top: Some(12.0),
+        margin_right: Some(12.0),
+        margin_bottom: Some(12.0),
+        margin_left: Some(12.0),
+        show_page_numbers: Some(true),
+        ..Default::default()
+    };
+
+    let mut warnings: Vec<PdfWarnMsg> = Vec::new();
+    let doc = PdfDocument::from_html(html, images, &fonts, &options, &mut warnings)
+        .map_err(|e| AppError::internal(format!("pdf generation failed: {e}")))?;
+
+    let mut save_warnings: Vec<PdfWarnMsg> = Vec::new();
+    let bytes = doc.save(&PdfSaveOptions::default(), &mut save_warnings);
+    Ok(bytes)
+}
+
+fn escape_html(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 fn parse_date_range(

@@ -33,6 +33,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 whisper-rs = "0.16"
 resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
 rust_xlsxwriter = "0.94"
+printpdf = { version = "0.9", default-features = true }
+base64 = "0.22"
 
 # Frontend (Dioxus)
 dioxus = { version = "0.5", features = ["macro"] }

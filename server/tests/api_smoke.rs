@@ -179,6 +179,26 @@ async fn smoke_flow_creates_audit_logs() {
         "expected PNG signature"
     );
 
+    // Export timeline report (PDF download + record creation).
+    let report = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/exports/timeline-report?format=pdf"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(report.0, StatusCode::OK);
+    let ct = report
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/pdf"),
+        "expected application/pdf content-type, got {ct}"
+    );
+    assert!(report.2.starts_with(b"%PDF"), "expected PDF signature");
+
     let exports_history = request_json(
         &app,
         Method::GET,
@@ -202,6 +222,12 @@ async fn smoke_flow_creates_audit_logs() {
         .find(|r| r.get("export_type").and_then(|v| v.as_str()) == Some("timeline"))
         .and_then(|r| r.get("id").and_then(|v| v.as_str()))
         .expect("timeline export id")
+        .to_string();
+    let report_export_id = records
+        .iter()
+        .find(|r| r.get("export_type").and_then(|v| v.as_str()) == Some("report"))
+        .and_then(|r| r.get("id").and_then(|v| v.as_str()))
+        .expect("report export id")
         .to_string();
 
     let download = request_raw(
@@ -227,6 +253,28 @@ async fn smoke_flow_creates_audit_logs() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(ct.starts_with("image/png"));
+
+    let report_download = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/exports/{report_export_id}/download"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(report_download.0, StatusCode::OK);
+    let ct = report_download
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/pdf"),
+        "expected application/pdf content-type, got {ct}"
+    );
+    assert!(
+        report_download.2.starts_with(b"%PDF"),
+        "expected PDF signature"
+    );
 
     let logs_export = request_raw(
         &app,
