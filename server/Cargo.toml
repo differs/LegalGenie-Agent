@@ -23,6 +23,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 whisper-rs.workspace = true
+resvg.workspace = true
 
 legalminds-shared = { path = "../shared" }
 

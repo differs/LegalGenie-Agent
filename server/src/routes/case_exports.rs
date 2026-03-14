@@ -13,7 +13,10 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use chrono::NaiveDate;
+use resvg::{tiny_skia, usvg};
 use serde::{Deserialize, Serialize};
+use sqlx::{QueryBuilder, Sqlite};
 use std::path::PathBuf;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
@@ -49,6 +52,10 @@ fn default_page_size() -> i64 {
 struct TimelineExportQuery {
     #[serde(default)]
     format: Option<String>,
+    #[serde(default)]
+    start_date: Option<String>,
+    #[serde(default)]
+    end_date: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -367,8 +374,11 @@ async fn download_export(
     let body = Body::from_stream(stream);
     let mut resp = Response::new(body);
 
-    let content_type = if file_name.to_ascii_lowercase().ends_with(".csv") {
+    let file_name_lc = file_name.to_ascii_lowercase();
+    let content_type = if file_name_lc.ends_with(".csv") {
         HeaderValue::from_static("text/csv; charset=utf-8")
+    } else if file_name_lc.ends_with(".png") {
+        HeaderValue::from_static("image/png")
     } else {
         HeaderValue::from_static("application/octet-stream")
     };
@@ -386,9 +396,10 @@ async fn download_export(
 async fn export_timeline(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(case_id): Path<String>,
     Query(q): Query<TimelineExportQuery>,
-) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
+) -> AppResult<Response> {
     let case_id = normalize_uuid(&case_id, "invalid case_id")?;
     ensure_case_access(&state.pool, user.user_id, &case_id).await?;
 
@@ -399,10 +410,451 @@ async fn export_timeline(
         .trim()
         .to_ascii_lowercase();
 
-    // Not implemented in current stage; reserved for future (PNG rendering/export).
-    Err(AppError::bad_request(format!(
-        "timeline export not implemented (requested format: {fmt})"
-    )))
+    if fmt != "png" {
+        return Err(AppError::bad_request("only format=png is supported"));
+    }
+
+    let (start, end) = parse_date_range(q.start_date.as_deref(), q.end_date.as_deref())?;
+
+    let case_name: Option<String> = sqlx::query_scalar("SELECT name FROM cases WHERE id = ?1")
+        .bind(&case_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+    let Some(case_name) = case_name else {
+        return Err(AppError::not_found("case not found"));
+    };
+
+    const MAX_NODES: usize = 200;
+    let nodes: Vec<TimelineNodeExportRow> = {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            r#"
+            SELECT id, title, description, event_time
+            FROM event_nodes
+            WHERE case_id = 
+            "#,
+        );
+        qb.push_bind(&case_id);
+        qb.push(" AND status != 'deleted'");
+        if let Some(start) = start {
+            qb.push(" AND event_time >= ");
+            qb.push_bind(start.to_string());
+        }
+        if let Some(end) = end {
+            qb.push(" AND event_time <= ");
+            qb.push_bind(end.to_string());
+        }
+        qb.push(" ORDER BY event_time ASC, sort_order ASC LIMIT ");
+        // Load one extra row so we can return a nice error message.
+        qb.push_bind((MAX_NODES + 1) as i64);
+
+        qb.build_query_as::<TimelineNodeExportRow>()
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| AppError::internal(format!("db error: {e}")))?
+    };
+
+    if nodes.len() > MAX_NODES {
+        return Err(AppError::bad_request(
+            "too many nodes to export; please narrow by start_date/end_date",
+        ));
+    }
+
+    let node_ids = nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+    let evidence_ids = fetch_evidence_ids_for_nodes(&state, &node_ids).await?;
+
+    const WIDTH: u32 = 1600;
+    const HEADER_H: u32 = 140;
+    const ROW_H: u32 = 72;
+    const FOOTER_H: u32 = 80;
+    const MAX_HEIGHT: u32 = 20_000;
+    let rows = (nodes.len().max(1)) as u32;
+    let height = HEADER_H + (ROW_H * rows) + FOOTER_H;
+    if height > MAX_HEIGHT {
+        return Err(AppError::bad_request(
+            "export result too large; please narrow by start_date/end_date",
+        ));
+    }
+
+    let svg = build_timeline_svg(
+        WIDTH,
+        height,
+        &case_name,
+        &user.username,
+        &nodes,
+        start,
+        end,
+    );
+    let png = render_svg_png(&svg, WIDTH, height)?;
+
+    let file_name = format!(
+        "{}_timeline_{}.png",
+        case_id,
+        chrono::Utc::now().format("%Y%m%d_%H%M%S")
+    );
+    let storage_path = format!("exports/{}/{}", case_id, file_name);
+    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+
+    if let Some(parent) = full_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::internal(format!("create dir failed: {e}")))?;
+    }
+
+    tokio::fs::write(&full_path, &png)
+        .await
+        .map_err(|e| AppError::internal(format!("write export failed: {e}")))?;
+
+    let record_id = Uuid::new_v4().to_string();
+    let node_ids_json =
+        serde_json::to_string(&node_ids).map_err(|e| AppError::internal(format!("{e}")))?;
+    let evidence_ids_json = if evidence_ids.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&evidence_ids).map_err(|e| AppError::internal(format!("{e}")))?)
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO export_records (
+          id, case_id, export_type, file_name, storage_path, file_size, generated_by, node_ids, evidence_ids
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "#,
+    )
+    .bind(&record_id)
+    .bind(&case_id)
+    .bind("timeline")
+    .bind(&file_name)
+    .bind(&storage_path)
+    .bind(png.len() as i64)
+    .bind(user.user_id.to_string())
+    .bind(node_ids_json)
+    .bind(evidence_ids_json)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(case_id.clone()),
+            action: "EXPORT".to_string(),
+            module: "export".to_string(),
+            target_type: "export_record".to_string(),
+            target_id: Some(record_id),
+            target_title: Some(file_name.clone()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "export_type": "timeline",
+                "file_name": file_name,
+                "storage_path": storage_path,
+                "file_size": png.len(),
+                "node_count": node_ids.len(),
+                "evidence_count": evidence_ids.len(),
+                "start_date": start.map(|d| d.to_string()),
+                "end_date": end.map(|d| d.to_string()),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
+    let file = tokio::fs::File::open(&full_path)
+        .await
+        .map_err(|_| AppError::not_found("export not found"))?;
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+    let mut resp = Response::new(body);
+
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+
+    let cd = format!("attachment; filename=\"{}\"", sanitize_filename(&file_name));
+    if let Ok(v) = cd.parse::<HeaderValue>() {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+
+    Ok(resp)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct TimelineNodeExportRow {
+    id: String,
+    title: String,
+    description: Option<String>,
+    event_time: String,
+}
+
+async fn fetch_evidence_ids_for_nodes(
+    state: &AppState,
+    node_ids: &[String],
+) -> AppResult<Vec<String>> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        r#"
+        SELECT DISTINCT l.evidence_id
+        FROM node_evidence_links l
+        JOIN evidence_files e ON e.id = l.evidence_id
+        WHERE e.status != 'deleted' AND l.node_id IN (
+        "#,
+    );
+
+    let mut separated = qb.separated(", ");
+    for id in node_ids {
+        separated.push_bind(id);
+    }
+    separated.push_unseparated(")");
+
+    qb.build_query_scalar::<String>()
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))
+}
+
+fn build_timeline_svg(
+    width: u32,
+    height: u32,
+    case_name: &str,
+    username: &str,
+    nodes: &[TimelineNodeExportRow],
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+) -> String {
+    const MARGIN_X: u32 = 60;
+    const LINE_X: u32 = 260;
+    const HEADER_H: u32 = 140;
+    const ROW_H: u32 = 72;
+
+    let content_x = LINE_X + 30;
+    let content_w = width.saturating_sub(content_x + MARGIN_X);
+    let title_max_chars = ((content_w as f32) / (18.0 * 0.95)).floor().max(10.0) as usize;
+    let desc_max_chars = ((content_w as f32) / (14.0 * 0.95)).floor().max(10.0) as usize;
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">"#
+    ));
+    svg.push_str(
+        r#"<style>text{font-family:"Noto Sans CJK SC","Noto Sans CJK","DejaVu Sans",sans-serif;}</style>"#,
+    );
+    svg.push_str(r##"<rect x="0" y="0" width="100%" height="100%" fill="#ffffff"/>"##);
+
+    // Header.
+    svg.push_str(&format!(
+        r##"<text x="{x}" y="60" font-size="28" font-weight="700" fill="#111">{t}</text>"##,
+        x = MARGIN_X,
+        t = escape_xml(case_name),
+    ));
+
+    let mut subtitle = format!("Timeline Export  Generated by {username}");
+    if let Some(s) = start {
+        subtitle.push_str(&format!("  start={}", s.format("%Y-%m-%d")));
+    }
+    if let Some(e) = end {
+        subtitle.push_str(&format!("  end={}", e.format("%Y-%m-%d")));
+    }
+    svg.push_str(&format!(
+        r##"<text x="{x}" y="92" font-size="14" fill="#555">{t}</text>"##,
+        x = MARGIN_X,
+        t = escape_xml(&subtitle),
+    ));
+
+    let generated_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    svg.push_str(&format!(
+        r##"<text x="{x}" y="114" font-size="12" fill="#777">Generated at {t}</text>"##,
+        x = MARGIN_X,
+        t = escape_xml(&generated_at.to_string()),
+    ));
+
+    // Timeline spine.
+    let start_y = HEADER_H;
+    let end_y = height.saturating_sub(60);
+    svg.push_str(&format!(
+        r##"<line x1="{x}" y1="{y1}" x2="{x}" y2="{y2}" stroke="#c8cdd3" stroke-width="4"/>"##,
+        x = LINE_X,
+        y1 = start_y,
+        y2 = end_y
+    ));
+
+    for (i, n) in nodes.iter().enumerate() {
+        let row_top = start_y + (i as u32) * ROW_H;
+        let y = row_top + (ROW_H / 2);
+
+        // Node marker.
+        svg.push_str(&format!(
+            r##"<circle cx="{x}" cy="{y}" r="8" fill="#2f5d8a"/>"##,
+            x = LINE_X,
+            y = y
+        ));
+        svg.push_str(&format!(
+            r##"<line x1="{x1}" y1="{y}" x2="{x2}" y2="{y}" stroke="#2f5d8a" stroke-width="3"/>"##,
+            x1 = LINE_X + 8,
+            x2 = LINE_X + 20,
+            y = y
+        ));
+
+        // Date.
+        svg.push_str(&format!(
+            r##"<text x="{x}" y="{y}" font-size="14" fill="#333">{t}</text>"##,
+            x = MARGIN_X,
+            y = y + 5,
+            t = escape_xml(&n.event_time)
+        ));
+
+        // Title.
+        let title_lines = wrap_text_lines(&n.title, title_max_chars, 2);
+        svg.push_str(&svg_multiline_text(
+            content_x,
+            y + 5,
+            18,
+            "#111",
+            &title_lines,
+        ));
+
+        // Description (optional).
+        if let Some(desc) = n
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let desc_lines = wrap_text_lines(desc, desc_max_chars, 3);
+            svg.push_str(&svg_multiline_text(
+                content_x,
+                y + 28,
+                14,
+                "#555",
+                &desc_lines,
+            ));
+        }
+    }
+
+    svg.push_str("</svg>");
+    svg
+}
+
+fn svg_multiline_text(x: u32, y: u32, font_size: u32, fill: &str, lines: &[String]) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        r#"<text x="{x}" y="{y}" font-size="{font_size}" fill="{fill}">"#,
+        x = x,
+        y = y,
+        font_size = font_size,
+        fill = fill
+    ));
+
+    for (idx, line) in lines.iter().enumerate() {
+        if idx == 0 {
+            out.push_str(&format!("<tspan>{}</tspan>", escape_xml(line)));
+        } else {
+            out.push_str(&format!(
+                r#"<tspan x="{x}" dy="{dy}">{t}</tspan>"#,
+                x = x,
+                dy = (font_size as i32 + 4).max(12),
+                t = escape_xml(line)
+            ));
+        }
+    }
+
+    out.push_str("</text>");
+    out
+}
+
+fn wrap_text_lines(raw: &str, max_chars: usize, max_lines: usize) -> Vec<String> {
+    let text = raw.trim();
+    if text.is_empty() || max_chars == 0 || max_lines == 0 {
+        return Vec::new();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if current.chars().count() >= max_chars {
+            lines.push(current);
+            current = String::new();
+        }
+        current.push(ch);
+        if lines.len() >= max_lines {
+            break;
+        }
+    }
+    if !current.is_empty() && lines.len() < max_lines {
+        lines.push(current);
+    }
+
+    if lines.len() == max_lines
+        && text.chars().count() > lines.iter().map(|l| l.chars().count()).sum()
+    {
+        // Indicate truncation on the last line.
+        let last = lines.last_mut().expect("last line exists");
+        let mut truncated = last
+            .chars()
+            .take(max_chars.saturating_sub(3))
+            .collect::<String>();
+        truncated.push_str("...");
+        *last = truncated;
+    }
+
+    lines
+}
+
+fn escape_xml(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn render_svg_png(svg: &str, width: u32, height: u32) -> AppResult<Vec<u8>> {
+    let mut opt = usvg::Options::default();
+    // Text rendering depends on fonts. Load system fonts when available.
+    opt.fontdb_mut().load_system_fonts();
+
+    let tree = usvg::Tree::from_str(svg, &opt)
+        .map_err(|e| AppError::internal(format!("invalid svg: {e:?}")))?;
+
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| AppError::internal("failed to create pixmap"))?;
+
+    // Render with identity transform. The SVG uses explicit pixel sizes.
+    let mut pm = pixmap.as_mut();
+    resvg::render(&tree, tiny_skia::Transform::default(), &mut pm);
+
+    pixmap
+        .encode_png()
+        .map_err(|e| AppError::internal(format!("encode png failed: {e}")))
+}
+
+fn parse_date_range(
+    start: Option<&str>,
+    end: Option<&str>,
+) -> AppResult<(Option<NaiveDate>, Option<NaiveDate>)> {
+    let start = start.map(parse_date).transpose()?;
+    let end = end.map(parse_date).transpose()?;
+    if let (Some(s), Some(e)) = (start, end) {
+        if s > e {
+            return Err(AppError::bad_request("start_date must be <= end_date"));
+        }
+    }
+    Ok((start, end))
+}
+
+fn parse_date(raw: &str) -> AppResult<NaiveDate> {
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map_err(|_| AppError::bad_request("invalid date (expected YYYY-MM-DD)"))
 }
 
 fn csv_row(fields: &[&str]) -> String {

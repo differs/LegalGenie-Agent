@@ -157,6 +157,29 @@ async fn smoke_flow_creates_audit_logs() {
     let body_str = String::from_utf8_lossy(&export.2);
     assert!(body_str.contains("evidence_id,original_name"));
 
+    // Export timeline (PNG download + record creation).
+    let timeline = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/exports/timeline?format=png"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(timeline.0, StatusCode::OK);
+    let ct = timeline
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("image/png"),
+        "expected image/png content-type, got {ct}"
+    );
+    assert!(
+        timeline.2.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "expected PNG signature"
+    );
+
     let exports_history = request_json(
         &app,
         Method::GET,
@@ -166,19 +189,45 @@ async fn smoke_flow_creates_audit_logs() {
     )
     .await;
     assert_eq!(exports_history.0, StatusCode::OK);
-    let export_id = exports_history.1["data"]["records"][0]["id"]
-        .as_str()
-        .expect("export id")
+    let records = exports_history.1["data"]["records"]
+        .as_array()
+        .expect("records array");
+    let evidence_export_id = records
+        .iter()
+        .find(|r| r.get("export_type").and_then(|v| v.as_str()) == Some("evidence_list"))
+        .and_then(|r| r.get("id").and_then(|v| v.as_str()))
+        .expect("evidence_list export id")
+        .to_string();
+    let timeline_export_id = records
+        .iter()
+        .find(|r| r.get("export_type").and_then(|v| v.as_str()) == Some("timeline"))
+        .and_then(|r| r.get("id").and_then(|v| v.as_str()))
+        .expect("timeline export id")
         .to_string();
 
     let download = request_raw(
         &app,
         Method::GET,
-        &format!("/api/v1/cases/{case_id}/exports/{export_id}/download"),
+        &format!("/api/v1/cases/{case_id}/exports/{evidence_export_id}/download"),
         Some(&token),
     )
     .await;
     assert_eq!(download.0, StatusCode::OK);
+
+    let timeline_download = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/exports/{timeline_export_id}/download"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(timeline_download.0, StatusCode::OK);
+    let ct = timeline_download
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.starts_with("image/png"));
 
     let logs_export = request_raw(
         &app,
