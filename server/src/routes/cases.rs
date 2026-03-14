@@ -19,6 +19,7 @@ pub fn router() -> Router<AppState> {
         .merge(super::case_files::router())
         .merge(super::case_members::router())
         .merge(super::case_persons::router())
+        .merge(super::case_exports::router())
         .merge(super::case_timeline::router())
 }
 

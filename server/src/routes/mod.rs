@@ -5,6 +5,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 mod auth;
+mod case_exports;
 mod case_files;
 mod case_members;
 mod case_persons;

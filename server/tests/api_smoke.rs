@@ -1,4 +1,5 @@
 use axum::body::Body;
+use axum::http::HeaderMap;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use legalminds_server::{router, AppConfig, AppState, CorsOrigins};
@@ -134,6 +135,50 @@ async fn smoke_flow_creates_audit_logs() {
     )
     .await;
     assert_eq!(link_resp.0, StatusCode::OK);
+
+    // Export evidence list (CSV download + record creation).
+    let export = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/exports/evidence-list"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(export.0, StatusCode::OK);
+    let ct = export
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/csv"),
+        "expected text/csv content-type, got {ct}"
+    );
+    let body_str = String::from_utf8_lossy(&export.2);
+    assert!(body_str.contains("evidence_id,original_name"));
+
+    let exports_history = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/exports/history"),
+        Some(&token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(exports_history.0, StatusCode::OK);
+    let export_id = exports_history.1["data"]["records"][0]["id"]
+        .as_str()
+        .expect("export id")
+        .to_string();
+
+    let download = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/exports/{export_id}/download"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(download.0, StatusCode::OK);
 
     // Audit logs are inserted asynchronously; wait until they show up.
     let logs = wait_for_case_logs(&app, &token, &case_id, 3).await;
@@ -278,6 +323,30 @@ Content-Type: text/plain\r\n\
         .to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     (status, json)
+}
+
+async fn request_raw(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    bearer: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = bearer {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let req = builder.body(Body::empty()).expect("build request");
+
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    (status, headers, body.to_vec())
 }
 
 async fn wait_for_case_logs(
