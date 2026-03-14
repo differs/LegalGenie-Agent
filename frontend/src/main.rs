@@ -50,6 +50,7 @@ impl AppCtx {
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Cases,
+    Files,
     Exports,
     Logs,
 }
@@ -189,6 +190,11 @@ fn App() -> Element {
                         "Cases"
                     }
                     button {
+                        class: if tab() == Tab::Files { "tab tab--active" } else { "tab" },
+                        onclick: move |_| tab.set(Tab::Files),
+                        "Files"
+                    }
+                    button {
                         class: if tab() == Tab::Exports { "tab tab--active" } else { "tab" },
                         onclick: move |_| tab.set(Tab::Exports),
                         "Exports"
@@ -304,6 +310,7 @@ fn App() -> Element {
             main { class: "content",
                 match tab() {
                     Tab::Cases => rsx! { pages::CasesPage {} },
+                    Tab::Files => rsx! { pages::FilesPage {} },
                     Tab::Exports => rsx! { pages::ExportsPage {} },
                     Tab::Logs => rsx! { pages::LogsPage {} },
                 }
@@ -459,6 +466,10 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
   padding:3px 8px;border-radius:999px;
   font-weight:800;font-size:11px;
 }
+.badge--ok{border-color:rgba(56,161,105,0.35);background:rgba(56,161,105,0.12);}
+.badge--warn{border-color:rgba(180,83,9,0.35);background:rgba(180,83,9,0.12);}
+.badge--bad{border-color:rgba(185,28,28,0.35);background:rgba(185,28,28,0.12);}
+.badge--run{border-color:rgba(49,130,206,0.35);background:rgba(49,130,206,0.12);}
 
 .table{display:grid;gap:8px;}
 .table__head,.table__row{
@@ -474,6 +485,9 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
 .table__head{font-weight:900;color:#111827;background:rgba(255,255,255,0.88);}
 .table--logs .table__head,.table--logs .table__row{
   grid-template-columns: 180px 140px 110px 110px 1.6fr 120px;
+}
+.table--files .table__head,.table--files .table__row{
+  grid-template-columns: 1.8fr 220px 110px 120px 170px 260px;
 }
 .cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .pager{display:flex;align-items:center;justify-content:space-between;margin-top:10px;}

@@ -63,6 +63,42 @@ pub struct ExportHistoryData {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct EvidenceFileSummary {
+    pub id: String,
+    pub original_name: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub storage_path: String,
+    pub parse_status: String,
+    pub parse_error: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct EvidenceFileListData {
+    pub files: Vec<EvidenceFileSummary>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct EvidenceFileDetail {
+    pub id: String,
+    pub case_id: String,
+    pub original_name: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub storage_path: String,
+    pub parse_status: String,
+    pub parse_error: Option<String>,
+    pub parsed_text: Option<String>,
+    pub page_count: Option<i64>,
+    pub duration: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct OperationLogItem {
     pub id: String,
     pub user_id: String,

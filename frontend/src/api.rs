@@ -105,6 +105,43 @@ pub async fn post_create_case(
     env.into_data()
 }
 
+pub async fn get_case_files(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    page: i64,
+    page_size: i64,
+) -> Result<crate::models::EvidenceFileListData, String> {
+    let url = build_url(
+        base,
+        &format!("/api/v1/cases/{case_id}/files?page={page}&page_size={page_size}"),
+    );
+    let env: ApiEnvelope<crate::models::EvidenceFileListData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn get_file_detail(
+    base: &str,
+    token: &str,
+    file_id: &str,
+) -> Result<crate::models::EvidenceFileDetail, String> {
+    let url = build_url(base, &format!("/api/v1/files/{file_id}"));
+    let env: ApiEnvelope<crate::models::EvidenceFileDetail> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_parse_file(
+    base: &str,
+    token: &str,
+    file_id: &str,
+) -> Result<serde_json::Value, String> {
+    let url = build_url(base, &format!("/api/v1/files/{file_id}/parse"));
+    let env: ApiEnvelope<serde_json::Value> = request_json("POST", &url, Some(token), None).await?;
+    env.into_data()
+}
+
 pub async fn get_export_history(
     base: &str,
     token: &str,
