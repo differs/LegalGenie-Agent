@@ -180,6 +180,21 @@ async fn smoke_flow_creates_audit_logs() {
     .await;
     assert_eq!(download.0, StatusCode::OK);
 
+    let logs_export = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/logs/export?case_id={case_id}"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(logs_export.0, StatusCode::OK);
+    let ct = logs_export
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.starts_with("text/csv"));
+
     // Audit logs are inserted asynchronously; wait until they show up.
     let logs = wait_for_case_logs(&app, &token, &case_id, 3).await;
     assert_eq!(logs.0, StatusCode::OK);

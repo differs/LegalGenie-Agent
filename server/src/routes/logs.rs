@@ -1,10 +1,15 @@
 use crate::access::ensure_case_access;
 use crate::api::ApiEnvelope;
+use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
+use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
+    http::{header, HeaderValue},
+    response::Response,
     routing::get,
     Json, Router,
 };
@@ -15,6 +20,7 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_logs))
+        .route("/export", get(export_logs))
         .route("/:target_type/:target_id/history", get(target_history))
 }
 
@@ -34,6 +40,8 @@ struct LogsQuery {
     end_time: Option<String>,
     #[serde(default)]
     keyword: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
     #[serde(default = "default_page")]
     page: i64,
     #[serde(default = "default_page_size")]
@@ -83,6 +91,181 @@ struct LogsListData {
     total: i64,
     page: i64,
     page_size: i64,
+}
+
+async fn export_logs(
+    State(state): State<AppState>,
+    user: AuthUser,
+    meta: RequestMeta,
+    Query(q): Query<LogsQuery>,
+) -> AppResult<Response> {
+    let is_admin = user.roles.iter().any(|r| r == "admin");
+
+    let user_id_filter = q
+        .user_id
+        .as_deref()
+        .map(|s| normalize_uuid(s, "invalid user_id"))
+        .transpose()?;
+    if let Some(uid) = user_id_filter.as_deref() {
+        if uid != user.user_id.to_string() && !is_admin {
+            return Err(AppError::forbidden("no permission to query other users"));
+        }
+    }
+
+    let case_id_filter = q
+        .case_id
+        .as_deref()
+        .map(|s| normalize_uuid(s, "invalid case_id"))
+        .transpose()?;
+    if let Some(cid) = case_id_filter.as_deref() {
+        ensure_case_access(&state.pool, user.user_id, cid).await?;
+    }
+
+    let module_filter = q
+        .module
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    let action_filter = q
+        .action
+        .as_deref()
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| !s.is_empty());
+    let keyword_filter = q
+        .keyword
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let start_time = q
+        .start_time
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let end_time = q
+        .end_time
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // We only support CSV for now. `format=excel` is accepted for compatibility.
+    let _format = q
+        .format
+        .as_deref()
+        .unwrap_or("csv")
+        .trim()
+        .to_ascii_lowercase();
+
+    const MAX_EXPORT_ROWS: i64 = 10_000;
+
+    let rows: Vec<LogRow> = {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            r#"
+            SELECT
+              l.id,
+              l.user_id,
+              l.user_name,
+              l.case_id,
+              l.action,
+              l.module,
+              l.target_type,
+              l.target_id,
+              l.target_title,
+              l.old_value,
+              l.new_value,
+              l.changed_fields,
+              l.ip_address,
+              l.user_agent,
+              l.request_id,
+              l.created_at
+            FROM operation_logs l
+            WHERE
+            "#,
+        );
+        apply_filters(
+            &mut qb,
+            &user,
+            is_admin,
+            user_id_filter.as_deref(),
+            case_id_filter.as_deref(),
+            module_filter.as_deref(),
+            action_filter.as_deref(),
+            start_time,
+            end_time,
+            keyword_filter,
+        );
+        qb.push(" ORDER BY l.created_at DESC LIMIT ");
+        qb.push_bind(MAX_EXPORT_ROWS);
+
+        qb.build_query_as::<LogRow>()
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| AppError::internal(format!("db error: {e}")))?
+    };
+
+    let mut csv = String::new();
+    csv.push_str("id,user_id,user_name,case_id,action,module,target_type,target_id,target_title,changed_fields,ip_address,created_at\n");
+    for r in &rows {
+        csv.push_str(&csv_row(&[
+            &r.id,
+            &r.user_id,
+            &r.user_name,
+            r.case_id.as_deref().unwrap_or(""),
+            &r.action,
+            &r.module,
+            &r.target_type,
+            r.target_id.as_deref().unwrap_or(""),
+            r.target_title.as_deref().unwrap_or(""),
+            r.changed_fields.as_deref().unwrap_or(""),
+            r.ip_address.as_deref().unwrap_or(""),
+            &r.created_at,
+        ]));
+        csv.push('\n');
+    }
+
+    // Audit log for export action (does not include exported content).
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: case_id_filter.clone(),
+            action: "EXPORT".to_string(),
+            module: "logs".to_string(),
+            target_type: "operation_logs".to_string(),
+            target_id: None,
+            target_title: None,
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "row_count": rows.len(),
+                "max_rows": MAX_EXPORT_ROWS,
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
+    let file_name = format!(
+        "operation_logs_{}.csv",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S")
+    );
+
+    let bytes = csv.into_bytes();
+    let body = Body::from(bytes);
+    let mut resp = Response::new(body);
+
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+
+    let cd = format!("attachment; filename=\"{}\"", sanitize_filename(&file_name));
+    if let Ok(v) = cd.parse::<HeaderValue>() {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+
+    Ok(resp)
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -476,6 +659,32 @@ fn diff_json(
 fn normalize_uuid(raw: &str, message: &str) -> AppResult<String> {
     let uuid = Uuid::parse_str(raw).map_err(|_| AppError::bad_request(message))?;
     Ok(uuid.to_string())
+}
+
+fn csv_row(fields: &[&str]) -> String {
+    fields
+        .iter()
+        .map(|f| csv_escape(f))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn csv_escape(raw: &str) -> String {
+    let needs_quotes =
+        raw.contains(',') || raw.contains('"') || raw.contains('\n') || raw.contains('\r');
+    if !needs_quotes {
+        return raw.to_string();
+    }
+    let escaped = raw.replace('"', "\"\"");
+    format!("\"{}\"", escaped)
+}
+
+fn sanitize_filename(raw: &str) -> String {
+    let mut s = raw.replace('\\', "_").replace('"', "_");
+    if s.is_empty() {
+        s = "download".to_string();
+    }
+    s
 }
 
 // Ensure we don't accidentally return a 200 on a handler that forgot to wrap `AppResult`.
