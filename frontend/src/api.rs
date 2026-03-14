@@ -40,6 +40,36 @@ pub async fn post_login(
     env.into_data()
 }
 
+pub async fn post_register(
+    base: &str,
+    username: &str,
+    email: &str,
+    password: &str,
+    real_name: Option<&str>,
+) -> Result<crate::models::LoginResponseData, String> {
+    let url = build_url(base, "/api/v1/auth/register");
+    let env: ApiEnvelope<crate::models::LoginResponseData> = request_json(
+        "POST",
+        &url,
+        None,
+        Some(json!({
+            "username": username,
+            "email": email,
+            "password": password,
+            "real_name": real_name,
+        })),
+    )
+    .await?;
+    env.into_data()
+}
+
+pub async fn get_me(base: &str, token: &str) -> Result<crate::models::UserInfo, String> {
+    let url = build_url(base, "/api/v1/auth/me");
+    let env: ApiEnvelope<crate::models::UserInfo> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
 pub async fn get_cases(
     base: &str,
     token: &str,

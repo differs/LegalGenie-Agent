@@ -3,6 +3,7 @@ mod models;
 mod pages;
 
 use dioxus::prelude::*;
+use models::UserInfo;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
@@ -24,6 +25,7 @@ pub struct AppCtx {
     pub api_base: Signal<String>,
     pub token: Signal<String>,
     pub case_id: Signal<String>,
+    pub user: Signal<Option<UserInfo>>,
     pub status: Signal<Option<String>>,
 }
 
@@ -39,6 +41,10 @@ impl AppCtx {
     pub fn case_id(&self) -> String {
         (self.case_id)()
     }
+
+    pub fn user(&self) -> Option<UserInfo> {
+        (self.user)()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -48,20 +54,30 @@ enum Tab {
     Logs,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum AuthMode {
+    Login,
+    Register,
+}
+
 #[component]
 fn App() -> Element {
     let mut api_base = use_signal(|| "http://127.0.0.1:8000".to_string());
     let mut token = use_signal(String::new);
-    let case_id = use_signal(String::new);
-    let status = use_signal(|| None::<String>);
+    let mut case_id = use_signal(String::new);
+    let mut user = use_signal(|| None::<UserInfo>);
+    let mut status = use_signal(|| None::<String>);
     let mut tab = use_signal(|| Tab::Exports);
 
     provide_context(AppCtx {
         api_base,
         token,
         case_id,
+        user,
         status,
     });
+
+    let mut auth_mode = use_signal(|| AuthMode::Login);
 
     let mut login_username = use_signal(String::new);
     let mut login_password = use_signal(String::new);
@@ -72,16 +88,86 @@ fn App() -> Element {
         let password = login_password();
         let mut status = status;
         let mut token = token;
+        let mut user = user;
         spawn(async move {
             status.set(Some("Logging in...".to_string()));
             match api::post_login(&base, &username, &password).await {
                 Ok(data) => {
                     token.set(data.access_token);
+                    user.set(Some(data.user));
                     status.set(Some("Logged in".to_string()));
                 }
                 Err(e) => status.set(Some(e)),
             }
         });
+    };
+
+    let mut reg_username = use_signal(String::new);
+    let mut reg_email = use_signal(String::new);
+    let mut reg_password = use_signal(String::new);
+    let mut reg_real_name = use_signal(String::new);
+
+    let on_register = move |_| {
+        let base = api_base();
+        let username = reg_username();
+        let email = reg_email();
+        let password = reg_password();
+        let real_name = reg_real_name();
+        let mut status = status;
+        let mut token = token;
+        let mut user = user;
+        let mut auth_mode = auth_mode;
+        spawn(async move {
+            if username.trim().is_empty() || email.trim().is_empty() {
+                status.set(Some("username/email required".to_string()));
+                return;
+            }
+            status.set(Some("Registering...".to_string()));
+            let real_name = if real_name.trim().is_empty() {
+                None
+            } else {
+                Some(real_name.trim())
+            };
+            match api::post_register(&base, username.trim(), email.trim(), &password, real_name)
+                .await
+            {
+                Ok(data) => {
+                    token.set(data.access_token);
+                    user.set(Some(data.user));
+                    auth_mode.set(AuthMode::Login);
+                    status.set(Some("Registered and logged in".to_string()));
+                }
+                Err(e) => status.set(Some(e)),
+            }
+        });
+    };
+
+    let on_me = move |_| {
+        let base = api_base();
+        let t = token();
+        let mut status = status;
+        let mut user = user;
+        spawn(async move {
+            if t.trim().is_empty() {
+                status.set(Some("Missing access token".to_string()));
+                return;
+            }
+            status.set(Some("Loading /me...".to_string()));
+            match api::get_me(&base, t.trim()).await {
+                Ok(u) => {
+                    user.set(Some(u.clone()));
+                    status.set(Some(format!("Me: {} ({})", u.username, u.roles.join(","))));
+                }
+                Err(e) => status.set(Some(e)),
+            }
+        });
+    };
+
+    let on_logout = move |_| {
+        token.set(String::new());
+        user.set(None);
+        case_id.set(String::new());
+        status.set(Some("Logged out (local)".to_string()));
     };
 
     rsx! {
@@ -130,25 +216,84 @@ fn App() -> Element {
                             rows: 2,
                         }
                     }
+                    if let Some(u) = ctx_user_line(user()) {
+                        div { class: "who", "{u}" }
+                    }
                 }
 
                 div { class: "auth",
-                    label { "Username"
-                        input {
-                            value: login_username(),
-                            placeholder: "username",
-                            oninput: move |e| login_username.set(e.value()),
+                    div { class: "auth__mode",
+                        button {
+                            class: if auth_mode() == AuthMode::Login { "tab tab--active" } else { "tab" },
+                            onclick: move |_| auth_mode.set(AuthMode::Login),
+                            "Login"
+                        }
+                        button {
+                            class: if auth_mode() == AuthMode::Register { "tab tab--active" } else { "tab" },
+                            onclick: move |_| auth_mode.set(AuthMode::Register),
+                            "Register"
                         }
                     }
-                    label { "Password"
-                        input {
-                            r#type: "password",
-                            value: login_password(),
-                            placeholder: "password",
-                            oninput: move |e| login_password.set(e.value()),
-                        }
+
+                    match auth_mode() {
+                        AuthMode::Login => rsx!{
+                            label { "Username"
+                                input {
+                                    value: login_username(),
+                                    placeholder: "username",
+                                    oninput: move |e| login_username.set(e.value()),
+                                }
+                            }
+                            label { "Password"
+                                input {
+                                    r#type: "password",
+                                    value: login_password(),
+                                    placeholder: "password",
+                                    oninput: move |e| login_password.set(e.value()),
+                                }
+                            }
+                            div { class: "actions",
+                                button { class: "btn btn--accent", onclick: on_login, "Login" }
+                                button { class: "btn btn--ghost", onclick: on_me, "Me" }
+                                button { class: "btn btn--ghost", onclick: on_logout, "Logout" }
+                            }
+                        },
+                        AuthMode::Register => rsx!{
+                            label { "Username"
+                                input {
+                                    value: reg_username(),
+                                    placeholder: "username",
+                                    oninput: move |e| reg_username.set(e.value()),
+                                }
+                            }
+                            label { "Email"
+                                input {
+                                    value: reg_email(),
+                                    placeholder: "email",
+                                    oninput: move |e| reg_email.set(e.value()),
+                                }
+                            }
+                            label { "Password"
+                                input {
+                                    r#type: "password",
+                                    value: reg_password(),
+                                    placeholder: "Password (min 8, upper/lower/digit)",
+                                    oninput: move |e| reg_password.set(e.value()),
+                                }
+                            }
+                            label { "Real name"
+                                input {
+                                    value: reg_real_name(),
+                                    placeholder: "optional",
+                                    oninput: move |e| reg_real_name.set(e.value()),
+                                }
+                            }
+                            div { class: "actions",
+                                button { class: "btn btn--accent", onclick: on_register, "Register" }
+                                button { class: "btn btn--ghost", onclick: move |_| auth_mode.set(AuthMode::Login), "Back" }
+                            }
+                        },
                     }
-                    button { class: "btn btn--accent", onclick: on_login, "Login" }
                 }
             }
 
@@ -165,6 +310,16 @@ fn App() -> Element {
             }
         }
     }
+}
+
+fn ctx_user_line(u: Option<UserInfo>) -> Option<String> {
+    let u = u?;
+    let roles = if u.roles.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", u.roles.join(","))
+    };
+    Some(format!("Signed in: {}{}", u.username, roles))
 }
 
 const APP_CSS: &str = r#"
@@ -231,6 +386,8 @@ body:before{
 }
 
 .conn,.auth{display:grid;gap:10px;align-content:start;}
+.who{font-size:12px;color:var(--muted);font-weight:800;padding-left:2px;}
+.auth__mode{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
 label{display:grid;gap:6px;font-size:11px;color:var(--muted);font-weight:700;}
 input,textarea{
   width:100%;
