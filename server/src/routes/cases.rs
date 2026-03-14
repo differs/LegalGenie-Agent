@@ -12,11 +12,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub fn router() -> Router<AppState> {
+pub fn router(max_upload_bytes: usize) -> Router<AppState> {
     Router::new()
         .route("/", get(list_cases).post(create_case))
         .route("/:id", get(get_case).put(update_case).delete(delete_case))
-        .merge(super::case_files::router())
+        .merge(super::case_files::router(max_upload_bytes))
         .merge(super::case_members::router())
         .merge(super::case_persons::router())
         .merge(super::case_exports::router())

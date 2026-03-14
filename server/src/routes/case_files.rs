@@ -5,6 +5,7 @@ use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
+    extract::DefaultBodyLimit,
     extract::{Multipart, Path, Query, State},
     routing::get,
     Json, Router,
@@ -14,11 +15,14 @@ use std::path::{Path as FsPath, PathBuf};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/:case_id/files",
-        get(list_case_files).post(upload_case_file),
-    )
+pub fn router(max_upload_bytes: usize) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/:case_id/files",
+            get(list_case_files).post(upload_case_file),
+        )
+        // Axum's default body limit is 2MB. File uploads are expected to be much larger.
+        .layer(DefaultBodyLimit::max(max_upload_bytes))
 }
 
 #[derive(Debug, Deserialize)]
