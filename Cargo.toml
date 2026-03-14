@@ -1,0 +1,38 @@
+[workspace]
+members = [
+  "server",
+  "shared",
+  "frontend",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+argon2 = "0.5"
+axum = { version = "0.7", features = ["macros", "multipart"] }
+chrono = { version = "0.4", features = ["serde"] }
+config = "0.14"
+dotenvy = "0.15"
+hound = "3"
+jsonwebtoken = "9"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate", "macros"] }
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+whisper-rs = "0.16"
+
+# Frontend (Dioxus)
+dioxus = { version = "0.5", features = ["macro"] }
+dioxus-web = "0.5"
+dioxus-desktop = "0.5"

@@ -1,0 +1,13 @@
+[package]
+name = "legalminds-frontend"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+dioxus.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dioxus-web.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dioxus-desktop.workspace = true

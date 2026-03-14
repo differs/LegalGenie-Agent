@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Dioxus / web build artifacts
+/dist/
+/frontend/dist/
+/frontend/target/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Local data
+/data/
+/storage/
+/logs/
+
+# Tool caches
+/.ruff_cache/
+
