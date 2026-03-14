@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::HeaderMap;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use legalminds_server::{router, AppConfig, AppState, CorsOrigins};
+use legalminds_server::{router, AppConfig, AppEnv, AppState, CorsOrigins};
 use serde_json::json;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::time::Duration;
@@ -368,11 +368,13 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         .expect("create tessdata");
 
     let cfg = AppConfig {
+        app_env: AppEnv::Test,
         server_host: "127.0.0.1".to_string(),
         server_port: 0,
         database_url: "sqlite::memory:".to_string(),
         cors_origins: CorsOrigins::Any,
-        jwt_secret: "test-secret-please-change".to_string(),
+        force_https: false,
+        jwt_secret: "test-secret-please-change-32-chars-min".to_string(),
         access_token_expire_minutes: 60,
         refresh_token_expire_days: 7,
         storage_path: storage_path.to_string_lossy().to_string(),

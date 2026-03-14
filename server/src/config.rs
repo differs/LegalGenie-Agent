@@ -1,9 +1,28 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppEnv {
+    Development,
+    Test,
+    Production,
+}
+
+impl AppEnv {
+    fn from_str(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "prod" | "production" => Self::Production,
+            "test" => Self::Test,
+            _ => Self::Development,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
+    pub app_env: AppEnv,
     pub server_host: String,
     pub server_port: u16,
     pub database_url: String,
     pub cors_origins: CorsOrigins,
+    pub force_https: bool,
     pub jwt_secret: String,
     pub access_token_expire_minutes: i64,
     pub refresh_token_expire_days: i64,
@@ -24,9 +43,11 @@ pub enum CorsOrigins {
 
 impl AppConfig {
     pub fn from_env() -> anyhow::Result<Self> {
+        let app_env = AppEnv::from_str(&env_string("APP_ENV", "development"));
         let server_host = env_string("SERVER_HOST", "127.0.0.1");
         let server_port = env_u16("SERVER_PORT", 8000)?;
         let database_url = env_string("DATABASE_URL", "sqlite://data/legal_minds.db");
+        let force_https = env_bool("FORCE_HTTPS", false)?;
         let jwt_secret = env_string("JWT_SECRET", "change-me-to-a-long-random-secret");
         let access_token_expire_minutes = env_i64("ACCESS_TOKEN_EXPIRE_MINUTES", 60)?;
         let refresh_token_expire_days = env_i64("REFRESH_TOKEN_EXPIRE_DAYS", 7)?;
@@ -47,11 +68,13 @@ impl AppConfig {
             Err(_) => CorsOrigins::Any,
         };
 
-        Ok(Self {
+        let cfg = Self {
+            app_env,
             server_host,
             server_port,
             database_url,
             cors_origins,
+            force_https,
             jwt_secret,
             access_token_expire_minutes,
             refresh_token_expire_days,
@@ -62,11 +85,35 @@ impl AppConfig {
             whisper_model_path,
             asr_language,
             asr_threads,
-        })
+        };
+
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.server_host, self.server_port)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.app_env == AppEnv::Production {
+            let secret = self.jwt_secret.trim();
+            if secret == "change-me-to-a-long-random-secret" || secret.len() < 32 {
+                anyhow::bail!(
+                    "JWT_SECRET must be at least 32 chars and not the default value in production"
+                );
+            }
+
+            if matches!(self.cors_origins, CorsOrigins::Any) {
+                anyhow::bail!("CORS_ORIGINS must be an allowlist (not '*') in production");
+            }
+
+            if !self.force_https {
+                anyhow::bail!("FORCE_HTTPS must be enabled in production");
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -91,6 +138,17 @@ fn env_i64(key: &str, default: i64) -> anyhow::Result<i64> {
 fn env_u64(key: &str, default: u64) -> anyhow::Result<u64> {
     match std::env::var(key) {
         Ok(v) => Ok(v.parse::<u64>()?),
+        Err(_) => Ok(default),
+    }
+}
+
+fn env_bool(key: &str, default: bool) -> anyhow::Result<bool> {
+    match std::env::var(key) {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(anyhow::anyhow!("invalid bool for {key}: {v}")),
+        },
         Err(_) => Ok(default),
     }
 }
