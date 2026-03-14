@@ -1,6 +1,8 @@
 use crate::access::ensure_case_access;
 use crate::api::ApiEnvelope;
+use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
+use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
@@ -89,6 +91,7 @@ struct TimelineNode {
 async fn update_node(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
     Json(req): Json<UpdateNodeRequest>,
 ) -> AppResult<Json<ApiEnvelope<TimelineNode>>> {
@@ -163,18 +166,78 @@ async fn update_node(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
+    let old_tags = existing
+        .tags
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+    let old_value = serde_json::json!({
+        "id": existing.id.clone(),
+        "case_id": existing.case_id.clone(),
+        "title": existing.title.clone(),
+        "description": existing.description.clone(),
+        "event_time": existing.event_time.clone(),
+        "sort_order": existing.sort_order,
+        "tags": old_tags,
+    });
+
     let node = fetch_node_with_links(&state, &user, &node_id).await?;
+    let new_value = serde_json::json!({
+        "id": node.id.clone(),
+        "case_id": node.case_id.clone(),
+        "title": node.title.clone(),
+        "description": node.description.clone(),
+        "event_time": node.event_time.clone(),
+        "sort_order": node.sort_order,
+        "tags": node.tags.clone(),
+    });
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(node.case_id.clone()),
+            action: "UPDATE".to_string(),
+            module: "node".to_string(),
+            target_type: "event_node".to_string(),
+            target_id: Some(node.id.clone()),
+            target_title: Some(node.title.clone()),
+            old_value: Some(old_value),
+            new_value: Some(new_value),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
     Ok(Json(ApiEnvelope::ok(node)))
 }
 
 async fn move_node(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
     Json(req): Json<MoveNodeRequest>,
 ) -> AppResult<Json<ApiEnvelope<TimelineNode>>> {
     let node_id = normalize_uuid(&id, "invalid node id")?;
     let existing = fetch_node(&state, &user, &node_id).await?;
+
+    let old_tags = existing
+        .tags
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+    let old_value = serde_json::json!({
+        "id": existing.id.clone(),
+        "case_id": existing.case_id.clone(),
+        "title": existing.title.clone(),
+        "description": existing.description.clone(),
+        "event_time": existing.event_time.clone(),
+        "sort_order": existing.sort_order,
+        "tags": old_tags,
+    });
 
     let new_time = parse_date(&req.new_time)?.to_string();
     let new_sort_order = match req.new_sort_order {
@@ -203,16 +266,61 @@ async fn move_node(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let node = fetch_node_with_links(&state, &user, &node_id).await?;
+
+    let new_value = serde_json::json!({
+        "id": node.id.clone(),
+        "case_id": node.case_id.clone(),
+        "title": node.title.clone(),
+        "description": node.description.clone(),
+        "event_time": node.event_time.clone(),
+        "sort_order": node.sort_order,
+        "tags": node.tags.clone(),
+    });
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(node.case_id.clone()),
+            action: "UPDATE".to_string(),
+            module: "node".to_string(),
+            target_type: "event_node".to_string(),
+            target_id: Some(node.id.clone()),
+            target_title: Some(node.title.clone()),
+            old_value: Some(old_value),
+            new_value: Some(new_value),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
     Ok(Json(ApiEnvelope::ok(node)))
 }
 
 async fn delete_node(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     let node_id = normalize_uuid(&id, "invalid node id")?;
     let existing = fetch_node(&state, &user, &node_id).await?;
+
+    let old_tags = existing
+        .tags
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+    let old_value = serde_json::json!({
+        "id": existing.id.clone(),
+        "case_id": existing.case_id.clone(),
+        "title": existing.title.clone(),
+        "description": existing.description.clone(),
+        "event_time": existing.event_time.clone(),
+        "sort_order": existing.sort_order,
+        "tags": old_tags,
+    });
 
     sqlx::query(
         "UPDATE event_nodes SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status != 'deleted'",
@@ -222,12 +330,33 @@ async fn delete_node(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(existing.case_id),
+            action: "DELETE".to_string(),
+            module: "node".to_string(),
+            target_type: "event_node".to_string(),
+            target_id: Some(existing.id),
+            target_title: Some(existing.title),
+            old_value: Some(old_value),
+            new_value: None,
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
     Ok(Json(ApiEnvelope::ok(serde_json::json!({}))))
 }
 
 async fn link_evidence(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
     Json(req): Json<LinkEvidenceRequest>,
 ) -> AppResult<Json<ApiEnvelope<EvidenceLink>>> {
@@ -276,25 +405,69 @@ async fn link_evidence(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    Ok(Json(ApiEnvelope::ok(EvidenceLink {
+    let link = EvidenceLink {
         id: link_id.to_string(),
-        evidence_id,
-        evidence_name,
-        anchor_type,
+        evidence_id: evidence_id.clone(),
+        evidence_name: evidence_name.clone(),
+        anchor_type: anchor_type.clone(),
         anchor_data: anchor_data_str
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok()),
-    })))
+    };
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(node.case_id),
+            action: "LINK".to_string(),
+            module: "node".to_string(),
+            target_type: "node_evidence_link".to_string(),
+            target_id: Some(link.id.clone()),
+            target_title: Some(evidence_name),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "id": link.id.clone(),
+                "node_id": node_id,
+                "evidence_id": evidence_id,
+                "anchor_type": anchor_type,
+                "anchor_data": link.anchor_data.clone(),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
+    Ok(Json(ApiEnvelope::ok(link)))
 }
 
 async fn unlink_evidence(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path((id, link_id)): Path<(String, String)>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     let node_id = normalize_uuid(&id, "invalid node id")?;
     let link_id = normalize_uuid(&link_id, "invalid link id")?;
-    let _node = fetch_node(&state, &user, &node_id).await?;
+    let node = fetch_node(&state, &user, &node_id).await?;
+
+    let link_row: Option<(String, String, Option<String>, String)> = sqlx::query_as(
+        r#"
+        SELECT l.evidence_id, l.anchor_type, l.anchor_data, e.original_name
+        FROM node_evidence_links l
+        JOIN evidence_files e ON e.id = l.evidence_id
+        WHERE l.id = ?1 AND l.node_id = ?2 AND e.status != 'deleted'
+        LIMIT 1
+        "#,
+    )
+    .bind(&link_id)
+    .bind(&node_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let deleted = sqlx::query("DELETE FROM node_evidence_links WHERE id = ?1 AND node_id = ?2")
         .bind(&link_id)
@@ -305,6 +478,39 @@ async fn unlink_evidence(
 
     if deleted.rows_affected() == 0 {
         return Err(AppError::not_found("link not found"));
+    }
+
+    if let Some((evidence_id, anchor_type, anchor_data, evidence_name)) = link_row {
+        let anchor_data = anchor_data
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        let link_id_for_log = link_id.clone();
+        let node_id_for_log = node_id.clone();
+        spawn_operation_log(
+            state.pool.clone(),
+            OperationLogNew {
+                user_id: user.user_id.to_string(),
+                user_name: user.username.clone(),
+                case_id: Some(node.case_id),
+                action: "UNLINK".to_string(),
+                module: "node".to_string(),
+                target_type: "node_evidence_link".to_string(),
+                target_id: Some(link_id_for_log.clone()),
+                target_title: Some(evidence_name.clone()),
+                old_value: Some(serde_json::json!({
+                    "id": link_id_for_log,
+                    "node_id": node_id_for_log,
+                    "evidence_id": evidence_id,
+                    "anchor_type": anchor_type,
+                    "anchor_data": anchor_data,
+                })),
+                new_value: None,
+                changed_fields: None,
+                ip_address: meta.ip_address,
+                user_agent: meta.user_agent,
+                request_id: Some(meta.request_id),
+            },
+        );
     }
 
     Ok(Json(ApiEnvelope::ok(serde_json::json!({}))))

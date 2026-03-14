@@ -1,6 +1,8 @@
 use crate::access::{ensure_case_access, ensure_case_owner};
 use crate::api::ApiEnvelope;
+use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
+use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
@@ -144,6 +146,7 @@ async fn list_members(
 async fn add_member(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(case_id): Path<String>,
     Json(req): Json<AddMemberRequest>,
 ) -> AppResult<Json<ApiEnvelope<CaseMember>>> {
@@ -220,6 +223,15 @@ async fn add_member(
         }
     }
 
+    let existing_role: Option<(String,)> = sqlx::query_as(
+        "SELECT role_in_case FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1",
+    )
+    .bind(&case_id)
+    .bind(&member_user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
     let new_id = Uuid::new_v4();
     sqlx::query(
         r#"
@@ -253,6 +265,46 @@ async fn add_member(
         return Err(AppError::internal("member upserted but not found"));
     };
 
+    let (action, old_value) = match existing_role {
+        Some((old_role,)) => (
+            "UPDATE".to_string(),
+            Some(serde_json::json!({
+                "case_id": case_id.clone(),
+                "user_id": member_user_id.clone(),
+                "username": username.clone(),
+                "role_in_case": old_role,
+            })),
+        ),
+        None => ("LINK".to_string(), None),
+    };
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(case_id.clone()),
+            action,
+            module: "case".to_string(),
+            target_type: "case_member".to_string(),
+            target_id: Some(member_user_id.clone()),
+            target_title: Some(username.clone()),
+            old_value,
+            new_value: Some(serde_json::json!({
+                "case_id": case_id.clone(),
+                "user_id": member_user_id.clone(),
+                "username": username.clone(),
+                "role_in_case": role.clone(),
+                "joined_at": joined_at.clone(),
+                "joined_by": joined_by.clone(),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
     Ok(Json(ApiEnvelope::ok(CaseMember {
         user_id: member_user_id,
         username,
@@ -267,6 +319,7 @@ async fn add_member(
 async fn remove_member(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path((case_id, user_id)): Path<(String, String)>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     let case_id = normalize_uuid(&case_id, "invalid case_id")?;
@@ -277,6 +330,21 @@ async fn remove_member(
         return Err(AppError::bad_request("cannot remove case owner"));
     }
 
+    let member_row: Option<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT u.username, m.role_in_case
+        FROM case_members m
+        JOIN users u ON u.id = m.user_id
+        WHERE m.case_id = ?1 AND m.user_id = ?2
+        LIMIT 1
+        "#,
+    )
+    .bind(&case_id)
+    .bind(&member_user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
     let deleted = sqlx::query("DELETE FROM case_members WHERE case_id = ?1 AND user_id = ?2")
         .bind(&case_id)
         .bind(&member_user_id)
@@ -286,6 +354,35 @@ async fn remove_member(
 
     if deleted.rows_affected() == 0 {
         return Err(AppError::not_found("member not found"));
+    }
+
+    if let Some((username, role_in_case)) = member_row {
+        let member_user_id_for_log = member_user_id.clone();
+        let case_id_for_log = case_id.clone();
+        spawn_operation_log(
+            state.pool.clone(),
+            OperationLogNew {
+                user_id: user.user_id.to_string(),
+                user_name: user.username.clone(),
+                case_id: Some(case_id_for_log.clone()),
+                action: "UNLINK".to_string(),
+                module: "case".to_string(),
+                target_type: "case_member".to_string(),
+                target_id: Some(member_user_id_for_log.clone()),
+                target_title: Some(username.clone()),
+                old_value: Some(serde_json::json!({
+                    "case_id": case_id_for_log,
+                    "user_id": member_user_id_for_log,
+                    "username": username,
+                    "role_in_case": role_in_case,
+                })),
+                new_value: None,
+                changed_fields: None,
+                ip_address: meta.ip_address,
+                user_agent: meta.user_agent,
+                request_id: Some(meta.request_id),
+            },
+        );
     }
 
     Ok(Json(ApiEnvelope::ok(serde_json::json!({}))))

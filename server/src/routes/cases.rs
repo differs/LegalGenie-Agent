@@ -1,5 +1,7 @@
 use crate::api::ApiEnvelope;
+use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
+use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
@@ -192,6 +194,7 @@ async fn list_cases(
 async fn create_case(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Json(req): Json<CreateCaseRequest>,
 ) -> AppResult<Json<ApiEnvelope<CaseDetail>>> {
     let name = req.name.trim();
@@ -231,6 +234,34 @@ async fn create_case(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let detail = fetch_case_detail(&state, &user, &case_id.to_string()).await?;
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(detail.id.clone()),
+            action: "CREATE".to_string(),
+            module: "case".to_string(),
+            target_type: "case".to_string(),
+            target_id: Some(detail.id.clone()),
+            target_title: Some(detail.name.clone()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "id": detail.id.clone(),
+                "name": detail.name.clone(),
+                "description": detail.description.clone(),
+                "status": detail.status.clone(),
+                "tags": detail.tags.clone(),
+                "owner_id": detail.owner_id.clone(),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
     Ok(Json(ApiEnvelope::ok(detail)))
 }
 
@@ -273,6 +304,7 @@ async fn get_case(
 async fn update_case(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
     Json(req): Json<UpdateCaseRequest>,
 ) -> AppResult<Json<ApiEnvelope<CaseDetail>>> {
@@ -289,6 +321,19 @@ async fn update_case(
     };
 
     ensure_case_access(&state, &user, &existing).await?;
+
+    let old_tags = existing
+        .tags
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok());
+    let old_value = serde_json::json!({
+        "id": existing.id.clone(),
+        "name": existing.name.clone(),
+        "description": existing.description.clone(),
+        "status": existing.status.clone(),
+        "tags": old_tags,
+        "owner_id": existing.owner_id.clone(),
+    });
 
     let new_name = req
         .name
@@ -323,15 +368,60 @@ async fn update_case(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let detail = fetch_case_detail(&state, &user, &id).await?;
+
+    let new_value = serde_json::json!({
+        "id": detail.id.clone(),
+        "name": detail.name.clone(),
+        "description": detail.description.clone(),
+        "status": detail.status.clone(),
+        "tags": detail.tags.clone(),
+        "owner_id": detail.owner_id.clone(),
+    });
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(detail.id.clone()),
+            action: "UPDATE".to_string(),
+            module: "case".to_string(),
+            target_type: "case".to_string(),
+            target_id: Some(detail.id.clone()),
+            target_title: Some(detail.name.clone()),
+            old_value: Some(old_value),
+            new_value: Some(new_value),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
     Ok(Json(ApiEnvelope::ok(detail)))
 }
 
 async fn delete_case(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     crate::access::ensure_case_owner(&state.pool, user.user_id, &id).await?;
+
+    let row: Option<(
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+    )> = sqlx::query_as(
+        "SELECT id, name, description, status, tags, owner_id FROM cases WHERE id = ?1 LIMIT 1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     sqlx::query(
         "UPDATE cases SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
@@ -340,6 +430,40 @@ async fn delete_case(
     .execute(&state.pool)
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    if let Some((case_id, name, description, status, tags_raw, owner_id)) = row {
+        let tags = tags_raw
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok());
+        let old_value = serde_json::json!({
+            "id": case_id.clone(),
+            "name": name.clone(),
+            "description": description,
+            "status": status,
+            "tags": tags,
+            "owner_id": owner_id,
+        });
+
+        spawn_operation_log(
+            state.pool.clone(),
+            OperationLogNew {
+                user_id: user.user_id.to_string(),
+                user_name: user.username.clone(),
+                case_id: Some(case_id.clone()),
+                action: "DELETE".to_string(),
+                module: "case".to_string(),
+                target_type: "case".to_string(),
+                target_id: Some(case_id),
+                target_title: Some(name),
+                old_value: Some(old_value),
+                new_value: None,
+                changed_fields: None,
+                ip_address: meta.ip_address,
+                user_agent: meta.user_agent,
+                request_id: Some(meta.request_id),
+            },
+        );
+    }
 
     Ok(Json(ApiEnvelope::ok(serde_json::json!({}))))
 }

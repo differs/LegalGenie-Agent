@@ -36,10 +36,11 @@ Server health check: `GET /api/v1/health`
 
 ## API (Current)
 
-- Auth: `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`, `GET /api/v1/auth/me`, `PUT /api/v1/auth/password`
+- Auth: `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/me`, `PUT /api/v1/auth/password`
 - Cases: `GET /api/v1/cases`, `POST /api/v1/cases`, `GET /api/v1/cases/:id`, `PUT /api/v1/cases/:id`, `DELETE /api/v1/cases/:id`
 - Case Members: `GET /api/v1/cases/:id/members`, `POST /api/v1/cases/:id/members`, `DELETE /api/v1/cases/:id/members/:user_id`
 - Files: `POST /api/v1/cases/:case_id/files` (multipart), `GET /api/v1/cases/:case_id/files`, `GET /api/v1/files/:id`, `GET /api/v1/files/:id/download`, `DELETE /api/v1/files/:id`
 - File Preview: `GET /api/v1/files/:id/preview`, `POST /api/v1/files/:id/parse`
 - Search: `GET /api/v1/search`, `GET /api/v1/search/cases`, `GET /api/v1/search/evidence`, `GET /api/v1/search/nodes`, `GET /api/v1/search/suggestions`, `GET /api/v1/search/history`, `DELETE /api/v1/search/history`
 - Timeline: `GET /api/v1/cases/:case_id/timeline/nodes`, `POST /api/v1/cases/:case_id/timeline/nodes`, `PUT /api/v1/timeline/nodes/:id`, `DELETE /api/v1/timeline/nodes/:id`, `POST /api/v1/timeline/nodes/:id/move`, `POST /api/v1/timeline/nodes/:id/evidence`, `DELETE /api/v1/timeline/nodes/:id/evidence/:link_id`
+- Logs: `GET /api/v1/logs`, `GET /api/v1/logs/:target_type/:target_id/history`

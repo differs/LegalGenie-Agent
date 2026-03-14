@@ -11,6 +11,7 @@ mod case_timeline;
 mod cases;
 mod files;
 mod health;
+mod logs;
 mod search;
 mod timeline;
 
@@ -21,7 +22,8 @@ pub fn router(state: AppState) -> Router {
         .nest("/cases", cases::router())
         .nest("/files", files::router())
         .nest("/search", search::router())
-        .nest("/timeline", timeline::router());
+        .nest("/timeline", timeline::router())
+        .nest("/logs", logs::router());
 
     Router::new()
         .nest("/api/v1", api)

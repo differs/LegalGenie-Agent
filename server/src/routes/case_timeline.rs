@@ -1,6 +1,8 @@
 use crate::access::ensure_case_access;
 use crate::api::ApiEnvelope;
+use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
+use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
@@ -215,6 +217,7 @@ async fn list_nodes(
 async fn create_node(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(case_id): Path<String>,
     Json(req): Json<CreateNodeRequest>,
 ) -> AppResult<Json<ApiEnvelope<TimelineNode>>> {
@@ -279,7 +282,7 @@ async fn create_node(
         return Err(AppError::internal("node inserted but not found"));
     };
 
-    Ok(Json(ApiEnvelope::ok(TimelineNode {
+    let node = TimelineNode {
         id: row.id,
         case_id: row.case_id,
         title: row.title,
@@ -294,7 +297,37 @@ async fn create_node(
         evidence_links: Vec::new(),
         created_at: row.created_at,
         updated_at: row.updated_at,
-    })))
+    };
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(node.case_id.clone()),
+            action: "CREATE".to_string(),
+            module: "node".to_string(),
+            target_type: "event_node".to_string(),
+            target_id: Some(node.id.clone()),
+            target_title: Some(node.title.clone()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "id": node.id.clone(),
+                "case_id": node.case_id.clone(),
+                "title": node.title.clone(),
+                "description": node.description.clone(),
+                "event_time": node.event_time.clone(),
+                "sort_order": node.sort_order,
+                "tags": node.tags.clone(),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
+    Ok(Json(ApiEnvelope::ok(node)))
 }
 
 async fn fetch_links(state: &AppState, node_ids: &[String]) -> AppResult<Vec<LinkRow>> {

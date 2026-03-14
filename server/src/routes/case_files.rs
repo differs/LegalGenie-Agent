@@ -1,5 +1,7 @@
 use crate::api::ApiEnvelope;
+use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
+use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
@@ -166,6 +168,7 @@ async fn list_case_files(
 async fn upload_case_file(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(case_id): Path<String>,
     mut multipart: Multipart,
 ) -> AppResult<Json<ApiEnvelope<EvidenceFileDetail>>> {
@@ -277,7 +280,7 @@ async fn upload_case_file(
         return Err(AppError::internal("file inserted but not found"));
     };
 
-    Ok(Json(ApiEnvelope::ok(EvidenceFileDetail {
+    let detail = EvidenceFileDetail {
         id: row.id,
         case_id: row.case_id,
         original_name: row.original_name,
@@ -290,7 +293,42 @@ async fn upload_case_file(
         page_count: row.page_count,
         duration: row.duration,
         created_at: row.created_at,
-    })))
+    };
+
+    // Audit log (avoid storing parsed_text).
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(detail.case_id.clone()),
+            action: "UPLOAD".to_string(),
+            module: "file".to_string(),
+            target_type: "evidence_file".to_string(),
+            target_id: Some(detail.id.clone()),
+            target_title: Some(detail.original_name.clone()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "id": detail.id.clone(),
+                "case_id": detail.case_id.clone(),
+                "original_name": detail.original_name.clone(),
+                "file_type": detail.file_type.clone(),
+                "file_size": detail.file_size,
+                "storage_path": detail.storage_path.clone(),
+                "parse_status": detail.parse_status.clone(),
+                "parse_error": detail.parse_error.clone(),
+                "page_count": detail.page_count,
+                "duration": detail.duration,
+                "created_at": detail.created_at.clone(),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
+    Ok(Json(ApiEnvelope::ok(detail)))
 }
 
 fn normalize_case_id(raw: &str) -> AppResult<String> {

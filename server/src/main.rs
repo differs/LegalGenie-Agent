@@ -1,8 +1,10 @@
 mod access;
 mod api;
 mod config;
+mod context;
 mod db;
 mod errors;
+mod oplog;
 mod parser;
 mod routes;
 mod state;
@@ -12,6 +14,7 @@ use crate::db::create_pool;
 use crate::routes::router;
 use crate::state::AppState;
 use anyhow::Context;
+use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -63,6 +66,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind {addr}"))?;
 
-    axum::serve(listener, app).await.context("serve")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("serve")?;
     Ok(())
 }

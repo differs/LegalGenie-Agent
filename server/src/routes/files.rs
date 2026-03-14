@@ -1,5 +1,7 @@
 use crate::api::ApiEnvelope;
+use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
+use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
@@ -86,10 +88,25 @@ async fn get_file(
 async fn delete_file(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     let id = normalize_file_id(&id)?;
     let row = fetch_file_row(&state, &user, &id).await?;
+
+    let old_value = serde_json::json!({
+        "id": row.id.clone(),
+        "case_id": row.case_id.clone(),
+        "original_name": row.original_name.clone(),
+        "file_type": row.file_type.clone(),
+        "file_size": row.file_size,
+        "storage_path": row.storage_path.clone(),
+        "parse_status": row.parse_status.clone(),
+        "parse_error": row.parse_error.clone(),
+        "page_count": row.page_count,
+        "duration": row.duration,
+        "created_at": row.created_at.clone(),
+    });
 
     // Soft delete only. Keep physical files for auditability (can be cleaned up later).
     sqlx::query(
@@ -99,6 +116,26 @@ async fn delete_file(
     .execute(&state.pool)
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(row.case_id.clone()),
+            action: "DELETE".to_string(),
+            module: "file".to_string(),
+            target_type: "evidence_file".to_string(),
+            target_id: Some(row.id.clone()),
+            target_title: Some(row.original_name.clone()),
+            old_value: Some(old_value),
+            new_value: None,
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
 
     Ok(Json(ApiEnvelope::ok(serde_json::json!({}))))
 }
@@ -172,6 +209,7 @@ async fn preview_file(
 async fn parse_file(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     let id = normalize_file_id(&id)?;
@@ -181,14 +219,43 @@ async fn parse_file(
         return Err(AppError::conflict("file is already processing"));
     }
 
-    let started =
-        crate::parser::enqueue_parse(state.pool.clone(), state.config.clone(), row.id, true)
-            .await
-            .map_err(|e| AppError::internal(format!("enqueue parse failed: {e}")))?;
+    let started = crate::parser::enqueue_parse(
+        state.pool.clone(),
+        state.config.clone(),
+        row.id.clone(),
+        true,
+    )
+    .await
+    .map_err(|e| AppError::internal(format!("enqueue parse failed: {e}")))?;
 
     if !started {
         return Err(AppError::not_found("file not found"));
     }
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(row.case_id.clone()),
+            action: "PARSE".to_string(),
+            module: "file".to_string(),
+            target_type: "evidence_file".to_string(),
+            target_id: Some(row.id.clone()),
+            target_title: Some(row.original_name.clone()),
+            old_value: Some(serde_json::json!({
+                "parse_status": row.parse_status.clone(),
+                "parse_error": row.parse_error.clone(),
+            })),
+            new_value: Some(serde_json::json!({
+                "parse_status": "processing",
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
 
     Ok(Json(ApiEnvelope::ok(serde_json::json!({}))))
 }

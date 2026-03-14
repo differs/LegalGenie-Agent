@@ -1,5 +1,7 @@
 use crate::api::ApiEnvelope;
+use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
+use crate::oplog::{spawn_operation_log, OperationLogNew};
 use crate::state::AppState;
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -193,6 +195,7 @@ struct UserRow {
 
 async fn register(
     State(state): State<AppState>,
+    meta: RequestMeta,
     Json(req): Json<RegisterRequest>,
 ) -> AppResult<Json<ApiEnvelope<LoginResponseData>>> {
     let username = req.username.trim();
@@ -238,6 +241,34 @@ async fn register(
         .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let roles = vec!["host_lawyer".to_string()];
+
+    // Audit log (do not include tokens).
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user_id.to_string(),
+            user_name: username.to_string(),
+            case_id: None,
+            action: "CREATE".to_string(),
+            module: "user".to_string(),
+            target_type: "user".to_string(),
+            target_id: Some(user_id.to_string()),
+            target_title: Some(username.to_string()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "id": user_id.to_string(),
+                "username": username,
+                "email": email,
+                "real_name": req.real_name.clone(),
+                "roles": roles.clone(),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
     let access_claims = build_access_claims(
         user_id,
         username,
@@ -266,6 +297,7 @@ async fn register(
 
 async fn login(
     State(state): State<AppState>,
+    meta: RequestMeta,
     Json(req): Json<LoginRequest>,
 ) -> AppResult<Json<ApiEnvelope<LoginResponseData>>> {
     let ident = req.username.trim();
@@ -330,6 +362,34 @@ async fn login(
     // remember_me is reserved for future: could lengthen refresh token or set cookie.
     let _ = req.remember_me;
 
+    // Audit log (do not include tokens).
+    let log_user_id = data.user.id.clone();
+    let log_username = data.user.username.clone();
+    let log_email = data.user.email.clone();
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: log_user_id.clone(),
+            user_name: log_username.clone(),
+            case_id: None,
+            action: "LOGIN".to_string(),
+            module: "user".to_string(),
+            target_type: "user".to_string(),
+            target_id: Some(log_user_id.clone()),
+            target_title: Some(log_username.clone()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "id": log_user_id,
+                "username": log_username,
+                "email": log_email,
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
     Ok(Json(ApiEnvelope::ok(data)))
 }
 
@@ -382,8 +442,31 @@ async fn refresh(
     })))
 }
 
-async fn logout() -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
+async fn logout(
+    State(state): State<AppState>,
+    user: AuthUser,
+    meta: RequestMeta,
+) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     // Stateless JWT: logout is a client-side concern unless we implement server-side revocation.
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: None,
+            action: "LOGOUT".to_string(),
+            module: "user".to_string(),
+            target_type: "user".to_string(),
+            target_id: Some(user.user_id.to_string()),
+            target_title: Some(user.username),
+            old_value: None,
+            new_value: None,
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
     Ok(Json(ApiEnvelope::ok(serde_json::json!({}))))
 }
 
@@ -414,6 +497,7 @@ async fn me(
 async fn change_password(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Json(req): Json<ChangePasswordRequest>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     if req.new_password.len() < 8 {
@@ -444,6 +528,27 @@ async fn change_password(
     .execute(&state.pool)
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    // Audit log: never include password values.
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username,
+            case_id: None,
+            action: "UPDATE".to_string(),
+            module: "user".to_string(),
+            target_type: "user".to_string(),
+            target_id: Some(user.user_id.to_string()),
+            target_title: None,
+            old_value: None,
+            new_value: None,
+            changed_fields: Some("password".to_string()),
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
 
     Ok(Json(ApiEnvelope::ok(serde_json::json!({}))))
 }
