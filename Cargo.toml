@@ -32,6 +32,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 whisper-rs = "0.16"
 resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
+rust_xlsxwriter = "0.94"
 
 # Frontend (Dioxus)
 dioxus = { version = "0.5", features = ["macro"] }

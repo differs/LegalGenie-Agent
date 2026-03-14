@@ -15,6 +15,7 @@ use axum::{
 };
 use chrono::NaiveDate;
 use resvg::{tiny_skia, usvg};
+use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
 use std::path::PathBuf;
@@ -233,27 +234,73 @@ async fn export_evidence_list(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    let mut csv = String::new();
-    csv.push_str("evidence_id,original_name,file_type,file_size,parse_status,page_count,duration,created_at,related_nodes\n");
-    for r in &rows {
-        csv.push_str(&csv_row(&[
-            &r.id,
-            &r.original_name,
-            &r.file_type,
-            &r.file_size.to_string(),
-            &r.parse_status,
-            &r.page_count.map(|v| v.to_string()).unwrap_or_default(),
-            &r.duration.map(|v| v.to_string()).unwrap_or_default(),
-            &r.created_at,
-            r.related_nodes.as_deref().unwrap_or(""),
-        ]));
-        csv.push('\n');
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    let _ = worksheet.set_name("Evidence List");
+
+    let headers = [
+        "evidence_id",
+        "original_name",
+        "file_type",
+        "file_size",
+        "parse_status",
+        "page_count",
+        "duration",
+        "created_at",
+        "related_nodes",
+    ];
+
+    for (col, h) in headers.iter().enumerate() {
+        worksheet
+            .write_string(0, col as u16, *h)
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
     }
 
-    let bytes = csv.into_bytes();
+    for (idx, r) in rows.iter().enumerate() {
+        let row = (idx + 1) as u32;
+        worksheet
+            .write_string(row, 0, &r.id)
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+        worksheet
+            .write_string(row, 1, &r.original_name)
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+        worksheet
+            .write_string(row, 2, &r.file_type)
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+        worksheet
+            .write_string(row, 3, &r.file_size.to_string())
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+        worksheet
+            .write_string(row, 4, &r.parse_status)
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+        worksheet
+            .write_string(
+                row,
+                5,
+                &r.page_count.map(|v| v.to_string()).unwrap_or_default(),
+            )
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+        worksheet
+            .write_string(
+                row,
+                6,
+                &r.duration.map(|v| v.to_string()).unwrap_or_default(),
+            )
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+        worksheet
+            .write_string(row, 7, &r.created_at)
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+        worksheet
+            .write_string(row, 8, r.related_nodes.as_deref().unwrap_or(""))
+            .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+    }
+
+    let bytes = workbook
+        .save_to_buffer()
+        .map_err(|e| AppError::internal(format!("xlsx save failed: {e}")))?;
     let file_name = format!(
-        "evidence_list_{}_{}.csv",
-        case_id,
+        "{}_evidence_list_{}.xlsx",
+        &case_id,
         chrono::Utc::now().format("%Y%m%d_%H%M%S")
     );
     let storage_path = format!("exports/{}/{}", case_id, file_name);
@@ -331,7 +378,9 @@ async fn export_evidence_list(
 
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("text/csv; charset=utf-8"),
+        HeaderValue::from_static(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
     );
 
     let cd = format!("attachment; filename=\"{}\"", sanitize_filename(&file_name));
@@ -377,6 +426,10 @@ async fn download_export(
     let file_name_lc = file_name.to_ascii_lowercase();
     let content_type = if file_name_lc.ends_with(".csv") {
         HeaderValue::from_static("text/csv; charset=utf-8")
+    } else if file_name_lc.ends_with(".xlsx") {
+        HeaderValue::from_static(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
     } else if file_name_lc.ends_with(".png") {
         HeaderValue::from_static("image/png")
     } else {
@@ -855,24 +908,6 @@ fn parse_date_range(
 fn parse_date(raw: &str) -> AppResult<NaiveDate> {
     NaiveDate::parse_from_str(raw, "%Y-%m-%d")
         .map_err(|_| AppError::bad_request("invalid date (expected YYYY-MM-DD)"))
-}
-
-fn csv_row(fields: &[&str]) -> String {
-    fields
-        .iter()
-        .map(|f| csv_escape(f))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn csv_escape(raw: &str) -> String {
-    let needs_quotes =
-        raw.contains(',') || raw.contains('"') || raw.contains('\n') || raw.contains('\r');
-    if !needs_quotes {
-        return raw.to_string();
-    }
-    let escaped = raw.replace('"', "\"\"");
-    format!("\"{}\"", escaped)
 }
 
 fn sanitize_filename(raw: &str) -> String {

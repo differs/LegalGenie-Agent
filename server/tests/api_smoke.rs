@@ -151,11 +151,10 @@ async fn smoke_flow_creates_audit_logs() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(
-        ct.starts_with("text/csv"),
-        "expected text/csv content-type, got {ct}"
+        ct.starts_with("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "expected xlsx content-type, got {ct}"
     );
-    let body_str = String::from_utf8_lossy(&export.2);
-    assert!(body_str.contains("evidence_id,original_name"));
+    assert!(export.2.starts_with(b"PK"), "expected XLSX signature");
 
     // Export timeline (PNG download + record creation).
     let timeline = request_raw(
