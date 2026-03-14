@@ -43,6 +43,7 @@ impl AppCtx {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
+    Cases,
     Exports,
     Logs,
 }
@@ -96,6 +97,11 @@ fn App() -> Element {
                 }
 
                 nav { class: "tabs",
+                    button {
+                        class: if tab() == Tab::Cases { "tab tab--active" } else { "tab" },
+                        onclick: move |_| tab.set(Tab::Cases),
+                        "Cases"
+                    }
                     button {
                         class: if tab() == Tab::Exports { "tab tab--active" } else { "tab" },
                         onclick: move |_| tab.set(Tab::Exports),
@@ -152,6 +158,7 @@ fn App() -> Element {
 
             main { class: "content",
                 match tab() {
+                    Tab::Cases => rsx! { pages::CasesPage {} },
                     Tab::Exports => rsx! { pages::ExportsPage {} },
                     Tab::Logs => rsx! { pages::LogsPage {} },
                 }

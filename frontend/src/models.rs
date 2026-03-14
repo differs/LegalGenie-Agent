@@ -100,3 +100,35 @@ pub struct TargetHistoryData {
     pub target_id: String,
     pub history: Vec<HistoryItem>,
 }
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct CaseSummary {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub member_count: i64,
+    pub evidence_count: i64,
+    pub node_count: i64,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct CaseListData {
+    pub cases: Vec<CaseSummary>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct CaseDetail {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub tags: Option<Vec<String>>,
+    pub owner_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}

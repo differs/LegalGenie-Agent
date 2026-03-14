@@ -40,6 +40,41 @@ pub async fn post_login(
     env.into_data()
 }
 
+pub async fn get_cases(
+    base: &str,
+    token: &str,
+    page: i64,
+    page_size: i64,
+) -> Result<crate::models::CaseListData, String> {
+    let url = build_url(
+        base,
+        &format!("/api/v1/cases?page={page}&page_size={page_size}"),
+    );
+    let env: ApiEnvelope<crate::models::CaseListData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_create_case(
+    base: &str,
+    token: &str,
+    name: &str,
+    description: Option<&str>,
+) -> Result<crate::models::CaseDetail, String> {
+    let url = build_url(base, "/api/v1/cases");
+    let env: ApiEnvelope<crate::models::CaseDetail> = request_json(
+        "POST",
+        &url,
+        Some(token),
+        Some(json!({
+            "name": name,
+            "description": description,
+        })),
+    )
+    .await?;
+    env.into_data()
+}
+
 pub async fn get_export_history(
     base: &str,
     token: &str,
