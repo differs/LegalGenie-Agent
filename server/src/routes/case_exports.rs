@@ -91,6 +91,8 @@ struct ExportRecordItem {
     node_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     evidence_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +115,7 @@ struct ExportRecordRow {
     generated_at: String,
     node_ids: Option<String>,
     evidence_ids: Option<String>,
+    template_name: Option<String>,
 }
 
 async fn export_history(
@@ -146,7 +149,8 @@ async fn export_history(
           generated_by,
           generated_at,
           node_ids,
-          evidence_ids
+          evidence_ids,
+          template_name
         FROM export_records
         WHERE case_id = ?1
         ORDER BY generated_at DESC
@@ -179,6 +183,7 @@ async fn export_history(
                 .evidence_ids
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok()),
+            template_name: r.template_name,
         })
         .collect::<Vec<_>>();
 
@@ -803,9 +808,13 @@ async fn export_timeline_report(
         .to_string();
     let report_title = format!("{} - 时间轴报告", case_name);
 
+    const TEMPLATE_NAME: &str = "templates/timeline_report.html";
+    let (template, template_source) = load_timeline_report_template();
+
     let (bytes, content_type, file_ext) = if fmt == "html" {
         let data_url = format!("data:image/png;base64,{}", STANDARD.encode(&timeline_png));
-        let html = build_timeline_report_html(
+        let html = render_timeline_report_html(
+            &template,
             &report_title,
             &generated_at,
             &user.username,
@@ -820,7 +829,8 @@ async fn export_timeline_report(
             "html",
         )
     } else {
-        let html = build_timeline_report_html(
+        let html = render_timeline_report_html(
+            &template,
             &report_title,
             &generated_at,
             &user.username,
@@ -869,9 +879,9 @@ async fn export_timeline_report(
     sqlx::query(
         r#"
         INSERT INTO export_records (
-          id, case_id, export_type, file_name, storage_path, file_size, generated_by, node_ids, evidence_ids
+          id, case_id, export_type, file_name, storage_path, file_size, generated_by, node_ids, evidence_ids, template_name
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         "#,
     )
     .bind(&record_id)
@@ -883,6 +893,7 @@ async fn export_timeline_report(
     .bind(user.user_id.to_string())
     .bind(node_ids_json)
     .bind(evidence_ids_json)
+    .bind(TEMPLATE_NAME)
     .execute(&state.pool)
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
@@ -903,6 +914,8 @@ async fn export_timeline_report(
                 "export_type": "report",
                 "report_kind": "timeline_report",
                 "format": fmt,
+                "template_name": TEMPLATE_NAME,
+                "template_source": template_source.as_str(),
                 "file_name": file_name,
                 "storage_path": storage_path,
                 "file_size": bytes.len(),
@@ -1201,7 +1214,41 @@ fn render_svg_png(svg: &str, width: u32, height: u32) -> AppResult<Vec<u8>> {
         .map_err(|e| AppError::internal(format!("encode png failed: {e}")))
 }
 
-fn build_timeline_report_html(
+const EMBEDDED_TIMELINE_REPORT_TEMPLATE: &str =
+    include_str!("../../../templates/timeline_report.html");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateSource {
+    File,
+    Embedded,
+}
+
+impl TemplateSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Embedded => "embedded",
+        }
+    }
+}
+
+fn load_timeline_report_template() -> (String, TemplateSource) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("templates")
+        .join("timeline_report.html");
+
+    match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => (s, TemplateSource::File),
+        _ => (
+            EMBEDDED_TIMELINE_REPORT_TEMPLATE.to_string(),
+            TemplateSource::Embedded,
+        ),
+    }
+}
+
+fn render_timeline_report_html(
+    template: &str,
     title: &str,
     generated_at: &str,
     username: &str,
@@ -1210,6 +1257,25 @@ fn build_timeline_report_html(
     nodes: &[TimelineReportNodeRow],
     timeline_img_src: &str,
 ) -> String {
+    let range = build_range_label(start, end);
+    let node_rows = build_timeline_report_rows(nodes);
+
+    render_template(
+        template,
+        &[
+            ("title", escape_html(title)),
+            ("generated_at", escape_html(generated_at)),
+            ("generated_by", escape_html(username)),
+            ("range", escape_html(&range)),
+            ("node_count", nodes.len().to_string()),
+            ("timeline_img_src", escape_html(timeline_img_src)),
+            // Pre-escaped per-cell; safe to inject as raw table rows.
+            ("node_rows", node_rows),
+        ],
+    )
+}
+
+fn build_range_label(start: Option<NaiveDate>, end: Option<NaiveDate>) -> String {
     let mut range = String::new();
     if let Some(s) = start {
         range.push_str(&format!("start={}", s.format("%Y-%m-%d")));
@@ -1223,76 +1289,32 @@ fn build_timeline_report_html(
     if range.is_empty() {
         range = "range=all".to_string();
     }
+    range
+}
 
-    let mut html = String::new();
-    html.push_str("<!doctype html><html><head><meta charset=\"utf-8\">");
-    html.push_str(&format!("<title>{}</title>", escape_html(title)));
-    html.push_str(
-        r#"<style>
-body{font-family:"Noto Sans CJK SC","Noto Sans CJK","DejaVu Sans",sans-serif;font-size:12pt;line-height:1.6;color:#111;margin:0;}
-.page{padding:24px;}
-h1{font-size:22pt;margin:0 0 8px 0;color:#0f172a;}
-.meta{font-size:10pt;color:#475569;margin:0 0 14px 0;}
-.meta span{margin-right:12px;}
-.timeline{width:100%;border:1px solid #e2e8f0;border-radius:8px;margin:10px 0 18px 0;}
-h2{font-size:14pt;margin:18px 0 10px 0;color:#1e293b;}
-table{width:100%;border-collapse:collapse;font-size:10pt;}
-th,td{border:1px solid #e2e8f0;padding:6px 8px;vertical-align:top;}
-th{background:#f8fafc;color:#0f172a;font-weight:700;}
-tr:nth-child(even){background:#f8fafb;}
-.col-date{width:110px;white-space:nowrap;}
-.col-ev{width:90px;white-space:nowrap;text-align:right;}
-.muted{color:#64748b;}
-</style></head><body>"#,
-    );
-
-    html.push_str("<div class=\"page\">");
-    html.push_str(&format!("<h1>{}</h1>", escape_html(title)));
-    html.push_str("<p class=\"meta\">");
-    html.push_str(&format!(
-        "<span>Generated at {}</span>",
-        escape_html(generated_at)
-    ));
-    html.push_str(&format!(
-        "<span>Generated by {}</span>",
-        escape_html(username)
-    ));
-    html.push_str(&format!(
-        "<span class=\"muted\">{}</span>",
-        escape_html(&range)
-    ));
-    html.push_str(&format!("<span>Nodes {}</span>", nodes.len().to_string()));
-    html.push_str("</p>");
-
-    html.push_str(&format!(
-        "<img class=\"timeline\" src=\"{}\" alt=\"timeline\" />",
-        escape_html(timeline_img_src)
-    ));
-
-    html.push_str("<h2>节点列表</h2>");
-    html.push_str("<table><thead><tr>");
-    html.push_str("<th class=\"col-date\">日期</th>");
-    html.push_str("<th>标题</th>");
-    html.push_str("<th>描述</th>");
-    html.push_str("<th class=\"col-ev\">证据数</th>");
-    html.push_str("</tr></thead><tbody>");
-
+fn build_timeline_report_rows(nodes: &[TimelineReportNodeRow]) -> String {
+    let mut rows = String::new();
     for n in nodes {
         let desc = n.description.as_deref().unwrap_or("");
-        html.push_str("<tr>");
-        html.push_str(&format!(
+        rows.push_str("<tr>");
+        rows.push_str(&format!(
             "<td class=\"col-date\">{}</td>",
             escape_html(&n.event_time)
         ));
-        html.push_str(&format!("<td>{}</td>", escape_html(&n.title)));
-        html.push_str(&format!("<td>{}</td>", escape_html(desc)));
-        html.push_str(&format!("<td class=\"col-ev\">{}</td>", n.evidence_count));
-        html.push_str("</tr>");
+        rows.push_str(&format!("<td>{}</td>", escape_html(&n.title)));
+        rows.push_str(&format!("<td>{}</td>", escape_html(desc)));
+        rows.push_str(&format!("<td class=\"col-ev\">{}</td>", n.evidence_count));
+        rows.push_str("</tr>");
     }
+    rows
+}
 
-    html.push_str("</tbody></table>");
-    html.push_str("</div></body></html>");
-    html
+fn render_template(template: &str, vars: &[(&str, String)]) -> String {
+    let mut out = template.to_string();
+    for (k, v) in vars {
+        out = out.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    out
 }
 
 fn render_html_to_pdf(html: &str, images: &BTreeMap<String, Base64OrRaw>) -> AppResult<Vec<u8>> {
