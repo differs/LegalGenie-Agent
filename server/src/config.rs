@@ -28,6 +28,7 @@ pub struct AppConfig {
     pub refresh_token_expire_days: i64,
     pub storage_path: String,
     pub max_file_size: u64,
+    pub allowed_file_types: Vec<String>,
     pub temp_path: String,
     pub tessdata_dir: String,
     pub whisper_model_path: String,
@@ -53,6 +54,10 @@ impl AppConfig {
         let refresh_token_expire_days = env_i64("REFRESH_TOKEN_EXPIRE_DAYS", 7)?;
         let storage_path = env_string("STORAGE_PATH", "./storage");
         let max_file_size = env_u64("MAX_FILE_SIZE", 104_857_600)?;
+        let allowed_file_types = parse_allowed_file_types(&env_string(
+            "ALLOWED_FILE_TYPES",
+            DEFAULT_ALLOWED_FILE_TYPES,
+        ));
         let temp_path = env_string(
             "TEMP_PATH",
             &format!("{}/temp", storage_path.trim_end_matches('/')),
@@ -80,6 +85,7 @@ impl AppConfig {
             refresh_token_expire_days,
             storage_path,
             max_file_size,
+            allowed_file_types,
             temp_path,
             tessdata_dir,
             whisper_model_path,
@@ -176,4 +182,34 @@ fn parse_cors_origins(raw: &str) -> CorsOrigins {
     } else {
         CorsOrigins::AllowList(origins)
     }
+}
+
+const DEFAULT_ALLOWED_FILE_TYPES: &str = "pdf,doc,docx,xls,xlsx,jpg,jpeg,png,mp3,wav,txt,json";
+
+fn parse_allowed_file_types(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_ALLOWED_FILE_TYPES
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+
+    let mut out = trimmed
+        .split(',')
+        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric()))
+        .collect::<Vec<_>>();
+
+    if out.is_empty() {
+        out = DEFAULT_ALLOWED_FILE_TYPES
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+
+    out
 }

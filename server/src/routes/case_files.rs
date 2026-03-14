@@ -179,7 +179,7 @@ async fn upload_case_file(
     let case_id = normalize_case_id(&case_id)?;
     crate::access::ensure_case_access(&state.pool, user.user_id, &case_id).await?;
 
-    let field = multipart
+    let mut field = multipart
         .next_field()
         .await
         .map_err(|e| AppError::bad_request(format!("multipart error: {e}")))?
@@ -189,17 +189,6 @@ async fn upload_case_file(
         .file_name()
         .map(str::to_string)
         .ok_or_else(|| AppError::bad_request("missing filename"))?;
-
-    let data = field
-        .bytes()
-        .await
-        .map_err(|e| AppError::bad_request(format!("read upload failed: {e}")))?;
-
-    if data.len() as u64 > state.config.max_file_size {
-        return Err(AppError::bad_request("file too large"));
-    }
-
-    let file_type = crate::file_security::validate_upload(&data, &original_name)?;
 
     let stored_name = generate_stored_name(&original_name);
     let storage_path = format!("files/{}/{}", case_id, stored_name);
@@ -211,13 +200,86 @@ async fn upload_case_file(
             .map_err(|e| AppError::internal(format!("create dir failed: {e}")))?;
     }
 
-    let mut f = tokio::fs::File::create(&full_path)
+    // Stream upload to disk to avoid holding large files in memory.
+    // We write to a temp file first, validate the header, then atomically rename.
+    const SNIFF_LIMIT: usize = 16 * 1024;
+    const VALIDATE_AT: usize = 512;
+
+    let uploading_path = full_path.with_file_name(format!("{stored_name}.uploading"));
+    let mut f = tokio::fs::File::create(&uploading_path)
         .await
         .map_err(|e| AppError::internal(format!("write file failed: {e}")))?;
-    f.write_all(&data)
+
+    let mut total: usize = 0;
+    let mut sniff: Vec<u8> = Vec::new();
+    let mut file_type: Option<String> = None;
+
+    while let Some(chunk) = field
+        .chunk()
         .await
-        .map_err(|e| AppError::internal(format!("write file failed: {e}")))?;
+        .map_err(|e| AppError::bad_request(format!("read upload failed: {e}")))?
+    {
+        total = total.saturating_add(chunk.len());
+        if total as u64 > state.config.max_file_size {
+            drop(f);
+            let _ = tokio::fs::remove_file(&uploading_path).await;
+            return Err(AppError::bad_request("file too large"));
+        }
+
+        if sniff.len() < SNIFF_LIMIT {
+            let remain = SNIFF_LIMIT - sniff.len();
+            let take = remain.min(chunk.len());
+            sniff.extend_from_slice(&chunk.as_ref()[..take]);
+        }
+
+        if file_type.is_none() && sniff.len() >= VALIDATE_AT {
+            match crate::file_security::validate_upload(
+                &sniff,
+                &original_name,
+                &state.config.allowed_file_types,
+            ) {
+                Ok(t) => file_type = Some(t),
+                Err(e) => {
+                    drop(f);
+                    let _ = tokio::fs::remove_file(&uploading_path).await;
+                    return Err(e);
+                }
+            }
+        }
+
+        f.write_all(chunk.as_ref())
+            .await
+            .map_err(|e| AppError::internal(format!("write file failed: {e}")))?;
+    }
+
+    if total == 0 {
+        drop(f);
+        let _ = tokio::fs::remove_file(&uploading_path).await;
+        return Err(AppError::bad_request("empty file"));
+    }
+
+    let file_type = match file_type {
+        Some(t) => t,
+        None => match crate::file_security::validate_upload(
+            &sniff,
+            &original_name,
+            &state.config.allowed_file_types,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                drop(f);
+                let _ = tokio::fs::remove_file(&uploading_path).await;
+                return Err(e);
+            }
+        },
+    };
+
     f.flush()
+        .await
+        .map_err(|e| AppError::internal(format!("write file failed: {e}")))?;
+    drop(f);
+
+    tokio::fs::rename(&uploading_path, &full_path)
         .await
         .map_err(|e| AppError::internal(format!("write file failed: {e}")))?;
 
@@ -236,7 +298,7 @@ async fn upload_case_file(
     .bind(&original_name)
     .bind(&stored_name)
     .bind(&file_type)
-    .bind(data.len() as i64)
+    .bind(total as i64)
     .bind(&storage_path)
     .bind(user.user_id.to_string())
     .execute(&state.pool)

@@ -1,7 +1,7 @@
 use crate::errors::{AppError, AppResult};
 use std::path::Path;
 
-const ALLOWED_MIME_TYPES: &[&str] = &[
+const SUPPORTED_MIME_TYPES: &[&str] = &[
     "application/pdf",
     "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -15,7 +15,11 @@ const ALLOWED_MIME_TYPES: &[&str] = &[
     "application/json",
 ];
 
-pub fn validate_upload(content: &[u8], filename: &str) -> AppResult<String> {
+pub fn validate_upload(
+    header_bytes: &[u8],
+    filename: &str,
+    allowed_file_types: &[String],
+) -> AppResult<String> {
     let ext = Path::new(filename)
         .extension()
         .and_then(|s| s.to_str())
@@ -27,15 +31,19 @@ pub fn validate_upload(content: &[u8], filename: &str) -> AppResult<String> {
         return Err(AppError::bad_request("invalid file extension"));
     }
 
+    if !allowed_file_types.is_empty() && !allowed_file_types.iter().any(|t| t == &ext) {
+        return Err(AppError::bad_request("unsupported file type"));
+    }
+
     let guessed = mime_guess::from_ext(&ext)
         .first_raw()
         .ok_or_else(|| AppError::bad_request("unknown file type"))?;
 
-    if !ALLOWED_MIME_TYPES.contains(&guessed) {
+    if !SUPPORTED_MIME_TYPES.contains(&guessed) {
         return Err(AppError::bad_request("unsupported file type"));
     }
 
-    let detected = infer::get(content)
+    let detected = infer::get(header_bytes)
         .map(|t| t.mime_type())
         .unwrap_or("application/octet-stream");
 

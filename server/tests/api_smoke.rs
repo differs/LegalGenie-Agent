@@ -336,6 +336,63 @@ async fn smoke_flow_creates_audit_logs() {
     );
 }
 
+#[tokio::test]
+async fn upload_over_2mb_is_allowed() {
+    let (app, _tmp) = build_test_app().await;
+
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "biguser",
+            "email": "biguser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let case_resp = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/cases",
+        Some(&token),
+        json!({
+            "name": "Big Upload Case",
+        }),
+    )
+    .await;
+    assert_eq!(case_resp.0, StatusCode::OK);
+    let case_id = case_resp.1["data"]["id"]
+        .as_str()
+        .expect("case id")
+        .to_string();
+
+    // Regression test: Axum's default body limit is 2MB. Our upload route must allow larger uploads.
+    let big = "a".repeat(2 * 1024 * 1024 + 10 * 1024);
+    let upload = request_multipart_text(
+        &app,
+        &format!("/api/v1/cases/{case_id}/files"),
+        &token,
+        "big.txt",
+        &big,
+    )
+    .await;
+    assert_eq!(upload.0, StatusCode::OK);
+
+    let file_size = upload.1["data"]["file_size"].as_i64().expect("file_size");
+    assert!(
+        file_size > (2 * 1024 * 1024) as i64,
+        "expected file_size >2MB, got {file_size}"
+    );
+}
+
 async fn build_test_app() -> (axum::Router, TempDir) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -379,6 +436,7 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         refresh_token_expire_days: 7,
         storage_path: storage_path.to_string_lossy().to_string(),
         max_file_size: 10 * 1024 * 1024,
+        allowed_file_types: vec!["txt".to_string(), "json".to_string()],
         temp_path: temp_path.to_string_lossy().to_string(),
         tessdata_dir: tessdata_dir.to_string_lossy().to_string(),
         whisper_model_path: tmp.path().join("whisper.bin").to_string_lossy().to_string(),

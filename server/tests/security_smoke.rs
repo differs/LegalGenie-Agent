@@ -116,6 +116,7 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         refresh_token_expire_days: 7,
         storage_path: storage_path.to_string_lossy().to_string(),
         max_file_size: 10 * 1024 * 1024,
+        allowed_file_types: vec!["txt".to_string(), "json".to_string()],
         temp_path: temp_path.to_string_lossy().to_string(),
         tessdata_dir: tessdata_dir.to_string_lossy().to_string(),
         whisper_model_path: tmp.path().join("whisper.bin").to_string_lossy().to_string(),
