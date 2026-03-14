@@ -21,6 +21,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/:id", get(get_file).delete(delete_file))
         .route("/:id/download", get(download_file))
+        .route("/:id/parsed", get(download_parsed))
         .route("/:id/preview", get(preview_file))
         .route("/:id/parse", post(parse_file))
 }
@@ -201,6 +202,66 @@ async fn download_file(
     Ok(resp)
 }
 
+async fn download_parsed(
+    State(state): State<AppState>,
+    user: AuthUser,
+    meta: RequestMeta,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let id = normalize_file_id(&id)?;
+    let row = fetch_file_row(&state, &user, &id).await?;
+
+    let parsed_rel = format!("parsed/{}/{}.json", row.case_id, row.id);
+    let full_path = PathBuf::from(&state.config.storage_path).join(&parsed_rel);
+    let file = tokio::fs::File::open(&full_path)
+        .await
+        .map_err(|_| AppError::not_found("parsed result not found"))?;
+    let parsed_size = tokio::fs::metadata(&full_path).await.ok().map(|m| m.len());
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(row.case_id.clone()),
+            action: "DOWNLOAD".to_string(),
+            module: "file".to_string(),
+            target_type: "evidence_file_parsed".to_string(),
+            target_id: Some(row.id.clone()),
+            target_title: Some(format!("{} (parsed)", row.original_name)),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "id": row.id.clone(),
+                "case_id": row.case_id.clone(),
+                "original_name": row.original_name.clone(),
+                "parsed_path": parsed_rel,
+                "parsed_size": parsed_size,
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
+
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+    let mut resp = Response::new(body);
+
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+
+    let filename = parsed_json_filename(&row.original_name);
+    let cd = format!("attachment; filename=\"{}\"", filename);
+    if let Ok(v) = cd.parse::<HeaderValue>() {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+
+    Ok(resp)
+}
+
 async fn preview_file(
     State(state): State<AppState>,
     user: AuthUser,
@@ -338,6 +399,18 @@ fn sanitize_filename(raw: &str) -> String {
         s = "download".to_string();
     }
     s
+}
+
+fn parsed_json_filename(original_name: &str) -> String {
+    let mut base = sanitize_filename(original_name);
+    if let Some(idx) = base.rfind('.') {
+        base.truncate(idx);
+    }
+    let base = base.trim();
+    if base.is_empty() {
+        return "parsed.json".to_string();
+    }
+    format!("{base}.json")
 }
 
 // Ensure we don't accidentally return a 200 on a handler that forgot to wrap `AppResult`.

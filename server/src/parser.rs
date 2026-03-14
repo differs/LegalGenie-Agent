@@ -1,5 +1,7 @@
 use crate::config::AppConfig;
 use anyhow::{anyhow, Context};
+use chrono::Utc;
+use serde::Serialize;
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -10,7 +12,41 @@ enum FileKind {
     Image,
     Audio,
     Text,
+    Excel,
+    Docx,
+    Doc,
     Unknown,
+}
+
+impl FileKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            FileKind::Pdf => "pdf",
+            FileKind::Image => "image",
+            FileKind::Audio => "audio",
+            FileKind::Text => "text",
+            FileKind::Excel => "excel",
+            FileKind::Docx => "docx",
+            FileKind::Doc => "doc",
+            FileKind::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ParsedArtifact<'a> {
+    version: u32,
+    evidence_id: &'a str,
+    case_id: &'a str,
+    original_name: &'a str,
+    file_type: &'a str,
+    kind: &'a str,
+    parsed_at: String,
+    page_count: Option<i64>,
+    duration: Option<i64>,
+    parsed_text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra: Option<&'a serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -18,6 +54,7 @@ struct ParseOutput {
     parsed_text: String,
     page_count: Option<i64>,
     duration: Option<i64>,
+    extra: Option<serde_json::Value>,
 }
 
 pub async fn enqueue_parse(
@@ -71,7 +108,6 @@ async fn mark_failed(pool: &SqlitePool, file_id: &str, err: &str) -> anyhow::Res
 }
 
 async fn mark_done(pool: &SqlitePool, file_id: &str, out: ParseOutput) -> anyhow::Result<()> {
-    let parsed_text = truncate_string(&out.parsed_text, 50_000_000); // guard runaway output
     sqlx::query(
         r#"
         UPDATE evidence_files
@@ -84,7 +120,7 @@ async fn mark_done(pool: &SqlitePool, file_id: &str, out: ParseOutput) -> anyhow
         WHERE id = ?4
         "#,
     )
-    .bind(parsed_text)
+    .bind(out.parsed_text)
     .bind(out.page_count)
     .bind(out.duration)
     .bind(file_id)
@@ -97,6 +133,7 @@ async fn mark_done(pool: &SqlitePool, file_id: &str, out: ParseOutput) -> anyhow
 #[derive(Debug, sqlx::FromRow)]
 struct EvidenceFileToParse {
     id: String,
+    case_id: String,
     original_name: String,
     file_type: String,
     storage_path: String,
@@ -109,7 +146,7 @@ async fn parse_and_update(
 ) -> anyhow::Result<()> {
     let row: Option<EvidenceFileToParse> = sqlx::query_as(
         r#"
-        SELECT id, original_name, file_type, storage_path
+        SELECT id, case_id, original_name, file_type, storage_path
         FROM evidence_files
         WHERE id = ?1 AND status != 'deleted'
         LIMIT 1
@@ -127,13 +164,26 @@ async fn parse_and_update(
     let full_path = PathBuf::from(&config.storage_path).join(&row.storage_path);
     let kind = detect_kind(&row.original_name, &row.file_type);
 
-    let out = match kind {
+    let mut out = match kind {
         FileKind::Pdf => parse_pdf(&full_path).await?,
         FileKind::Image => parse_image(&full_path, config).await?,
         FileKind::Audio => parse_audio(&full_path, config, &row.id).await?,
         FileKind::Text => parse_text(&full_path).await?,
-        FileKind::Unknown => parse_text(&full_path).await?,
+        FileKind::Excel => parse_excel(&full_path).await?,
+        FileKind::Docx => parse_docx(&full_path).await?,
+        FileKind::Doc => parse_doc(&full_path).await?,
+        FileKind::Unknown => {
+            return Err(anyhow!(
+                "unsupported file type: original_name={} file_type={}",
+                row.original_name,
+                row.file_type
+            ));
+        }
     };
+
+    // Guard runaway output (and keep json/db consistent).
+    out.parsed_text = truncate_string(&out.parsed_text, 50_000_000);
+    write_parsed_artifact(config, &row, kind, &out).await?;
 
     mark_done(pool, &row.id, out).await?;
     Ok(())
@@ -150,6 +200,20 @@ fn detect_kind(original_name: &str, file_type: &str) -> FileKind {
     if ft.starts_with("audio/") {
         return FileKind::Audio;
     }
+    if ft.starts_with("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        || ft.starts_with("application/vnd.ms-excel")
+    {
+        return FileKind::Excel;
+    }
+    if ft.starts_with("application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+        return FileKind::Docx;
+    }
+    if ft.starts_with("application/msword") {
+        return FileKind::Doc;
+    }
+    if ft.starts_with("text/") || ft.starts_with("application/json") {
+        return FileKind::Text;
+    }
 
     let ext = Path::new(original_name)
         .extension()
@@ -162,6 +226,9 @@ fn detect_kind(original_name: &str, file_type: &str) -> FileKind {
         "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff" => FileKind::Image,
         "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" => FileKind::Audio,
         "txt" | "md" | "csv" | "json" => FileKind::Text,
+        "xlsx" | "xls" => FileKind::Excel,
+        "docx" => FileKind::Docx,
+        "doc" => FileKind::Doc,
         _ => FileKind::Unknown,
     }
 }
@@ -173,6 +240,7 @@ async fn parse_text(path: &Path) -> anyhow::Result<ParseOutput> {
         parsed_text: text,
         page_count: None,
         duration: None,
+        extra: None,
     })
 }
 
@@ -187,6 +255,7 @@ async fn parse_pdf(path: &Path) -> anyhow::Result<ParseOutput> {
         parsed_text: text,
         page_count,
         duration: None,
+        extra: None,
     })
 }
 
@@ -226,6 +295,7 @@ async fn parse_image(path: &Path, config: &AppConfig) -> anyhow::Result<ParseOut
         parsed_text: text,
         page_count: None,
         duration: None,
+        extra: None,
     })
 }
 
@@ -256,7 +326,232 @@ async fn parse_audio(
         parsed_text: transcript,
         page_count: None,
         duration,
+        extra: Some(serde_json::json!({
+            "duration_seconds": duration,
+            "segments": null
+        })),
     })
+}
+
+async fn parse_excel(path: &Path) -> anyhow::Result<ParseOutput> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || parse_excel_sync(&path))
+        .await
+        .context("join excel parse task")?
+}
+
+fn parse_excel_sync(path: &Path) -> anyhow::Result<ParseOutput> {
+    use calamine::{open_workbook_auto, Data, Reader};
+
+    const MAX_CELLS: usize = 200_000;
+    const MAX_TEXT_BYTES: usize = 5_000_000;
+
+    let mut workbook =
+        open_workbook_auto(path).with_context(|| format!("open excel: {}", path.display()))?;
+    let sheet_names = workbook.sheet_names();
+    let mut text = String::new();
+    let mut cell_count: usize = 0;
+    let mut truncated = false;
+
+    for sheet in &sheet_names {
+        if cell_count >= MAX_CELLS || text.len() >= MAX_TEXT_BYTES {
+            truncated = true;
+            break;
+        }
+
+        let range = match workbook.worksheet_range(sheet) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:?}"), sheet = sheet, "skip unreadable sheet");
+                continue;
+            }
+        };
+
+        text.push_str("Sheet: ");
+        text.push_str(sheet);
+        text.push('\n');
+
+        for row in range.rows() {
+            for cell in row {
+                if cell_count >= MAX_CELLS || text.len() >= MAX_TEXT_BYTES {
+                    truncated = true;
+                    break;
+                }
+
+                let s = match cell {
+                    Data::Empty => String::new(),
+                    Data::String(s) => s.trim().to_string(),
+                    Data::Float(f) => {
+                        if f.fract() == 0.0 {
+                            format!("{}", *f as i64)
+                        } else {
+                            f.to_string()
+                        }
+                    }
+                    Data::Int(i) => i.to_string(),
+                    Data::Bool(b) => b.to_string(),
+                    other => other.to_string(),
+                };
+
+                if !s.is_empty() {
+                    text.push_str(&s);
+                    text.push(' ');
+                }
+                cell_count = cell_count.saturating_add(1);
+            }
+
+            if truncated {
+                break;
+            }
+            text.push('\n');
+        }
+        text.push('\n');
+    }
+
+    Ok(ParseOutput {
+        parsed_text: text.trim().to_string(),
+        page_count: None,
+        duration: None,
+        extra: Some(serde_json::json!({
+            "sheet_names": sheet_names,
+            "cell_count": cell_count,
+            "truncated": truncated,
+        })),
+    })
+}
+
+async fn parse_docx(path: &Path) -> anyhow::Result<ParseOutput> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || parse_docx_sync(&path))
+        .await
+        .context("join docx parse task")?
+}
+
+fn parse_docx_sync(path: &Path) -> anyhow::Result<ParseOutput> {
+    use quick_xml::escape;
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+    use std::io::Read;
+
+    let f = std::fs::File::open(path).with_context(|| format!("open docx: {}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(f).context("open docx zip")?;
+
+    let mut xml = String::new();
+    zip.by_name("word/document.xml")
+        .context("missing word/document.xml")?
+        .read_to_string(&mut xml)
+        .context("read document.xml")?;
+
+    let mut reader = Reader::from_str(&xml);
+    // Keep whitespace as-is, docx text often depends on it.
+    reader.config_mut().trim_text(false);
+
+    let mut buf = Vec::new();
+    let mut out = String::new();
+    let mut in_text = false;
+    let mut paragraph_count: i64 = 0;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let qname = e.name();
+                let name = local_name(qname.as_ref());
+                if name == b"t" {
+                    in_text = true;
+                }
+            }
+            Ok(Event::End(e)) => {
+                let qname = e.name();
+                let name = local_name(qname.as_ref());
+                if name == b"t" {
+                    in_text = false;
+                } else if name == b"p" {
+                    out.push('\n');
+                    paragraph_count = paragraph_count.saturating_add(1);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let qname = e.name();
+                let name = local_name(qname.as_ref());
+                if name == b"tab" {
+                    out.push('\t');
+                } else if name == b"br" {
+                    out.push('\n');
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if in_text {
+                    let decoded = e.xml_content().context("decode docx text")?;
+                    let unescaped =
+                        escape::unescape(decoded.as_ref()).context("unescape docx text")?;
+                    out.push_str(unescaped.as_ref());
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(anyhow!("docx xml parse failed: {e}")),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(ParseOutput {
+        parsed_text: out.trim().to_string(),
+        page_count: None,
+        duration: None,
+        extra: Some(serde_json::json!({
+            "paragraph_count": paragraph_count,
+        })),
+    })
+}
+
+fn local_name(raw: &[u8]) -> &[u8] {
+    match raw.iter().rposition(|b| *b == b':') {
+        Some(idx) => &raw[idx + 1..],
+        None => raw,
+    }
+}
+
+async fn parse_doc(_path: &Path) -> anyhow::Result<ParseOutput> {
+    Err(anyhow!(
+        "legacy .doc is not supported yet; please convert to .docx"
+    ))
+}
+
+async fn write_parsed_artifact(
+    config: &AppConfig,
+    row: &EvidenceFileToParse,
+    kind: FileKind,
+    out: &ParseOutput,
+) -> anyhow::Result<()> {
+    let rel = format!("parsed/{}/{}.json", row.case_id, row.id);
+    let full_path = PathBuf::from(&config.storage_path).join(&rel);
+
+    if let Some(parent) = full_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create parsed dir: {}", parent.display()))?;
+    }
+
+    let payload = ParsedArtifact {
+        version: 1,
+        evidence_id: &row.id,
+        case_id: &row.case_id,
+        original_name: &row.original_name,
+        file_type: &row.file_type,
+        kind: kind.as_str(),
+        parsed_at: Utc::now().to_rfc3339(),
+        page_count: out.page_count,
+        duration: out.duration,
+        parsed_text: &out.parsed_text,
+        extra: out.extra.as_ref(),
+    };
+
+    let bytes = serde_json::to_vec(&payload).context("serialize parsed json")?;
+    tokio::fs::write(&full_path, bytes)
+        .await
+        .with_context(|| format!("write parsed json: {}", full_path.display()))?;
+
+    Ok(())
 }
 
 async fn audio_duration_seconds(path: &Path) -> anyhow::Result<f64> {

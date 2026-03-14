@@ -29,6 +29,9 @@ printpdf.workspace = true
 base64.workspace = true
 infer.workspace = true
 mime_guess.workspace = true
+calamine.workspace = true
+quick-xml.workspace = true
+zip.workspace = true
 
 legalminds-shared = { path = "../shared" }
 
