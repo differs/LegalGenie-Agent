@@ -237,18 +237,25 @@ Content-Type: multipart/form-data
 file: (binary)
 ```
 
+**说明**：上传后会异步解析文件，初次响应通常 `parse_status=processing`，`parsed_text/page_count/duration` 可能为空；解析完成后可通过“文件详情”查看解析结果。
+
 **响应**：
 ```json
 {
     "code": 200,
     "data": {
-        "id": "evidence_001",
+        "id": "evidence_uuid",
+        "case_id": "case_uuid",
         "original_name": "合同.pdf",
         "file_type": "application/pdf",
         "file_size": 1024000,
-        "page_count": 10,
-        "parsed_text": "合同内容...",
-        "storage_path": "files/case_001/uuid.pdf"
+        "storage_path": "files/{case_id}/{stored_name}.pdf",
+        "parse_status": "processing",
+        "parse_error": null,
+        "parsed_text": null,
+        "page_count": null,
+        "duration": null,
+        "created_at": "2026-03-15 12:00:00"
     }
 }
 ```
@@ -294,6 +301,15 @@ Authorization: Bearer {token}
 POST /api/v1/files/:id/parse
 Authorization: Bearer {token}
 ```
+
+### 4.8 下载解析结果（JSON）
+
+```http
+GET /api/v1/files/:id/parsed
+Authorization: Bearer {token}
+```
+
+> 返回 `application/json` 文件流（对应 `storage/parsed/{case_id}/{evidence_id}.json`）。若解析尚未完成或无结果，返回 404。
 
 ---
 
@@ -531,6 +547,15 @@ GET /api/v1/logs/:target_type/:target_id/history
 Authorization: Bearer {token}
 ```
 
+### 8.3 导出日志（CSV/Excel）
+
+```http
+GET /api/v1/logs/export?case_id=case_001&format=csv
+Authorization: Bearer {token}
+```
+
+> `format`：`csv`（默认）/ `excel`（xlsx）。其他过滤参数同日志列表（`user_id/module/action/start_time/end_time/keyword`）。
+
 ---
 
 ## 九、导出接口
@@ -556,6 +581,22 @@ GET /api/v1/cases/:case_id/exports/history
 Authorization: Bearer {token}
 ```
 
+### 9.4 导出时间轴报告（图文报告）
+
+```http
+GET /api/v1/cases/:case_id/exports/timeline-report?format=pdf
+Authorization: Bearer {token}
+```
+
+> `format`：`pdf` / `html`；可选 `start_date/end_date`（YYYY-MM-DD）。
+
+### 9.5 下载导出文件
+
+```http
+GET /api/v1/cases/:case_id/exports/:export_id/download
+Authorization: Bearer {token}
+```
+
 ---
 
 ## 十、完整接口清单
@@ -564,18 +605,18 @@ Authorization: Bearer {token}
 |------|------|------|
 | 认证 | /auth/* | 6 |
 | 案件 | /cases/* | 7 |
-| 文件 | /files/* | 7 |
+| 文件 | /files/* | 8 |
 | 时间轴 | /timeline/nodes/* | 7 |
 | 人物 | /persons/* | 7 |
 | 搜索 | /search/* | 3 |
-| 日志 | /logs/* | 2 |
-| 导出 | /exports/* | 3 |
-| **总计** | | **42** |
+| 日志 | /logs/* | 3 |
+| 导出 | /exports/* | 5 |
+| **总计** | | **46** |
 
 ---
 
 **文档版本**：v1.0  
-**最后更新**：2026 年 3 月 14 日  
+**最后更新**：2026 年 3 月 15 日  
 **开发负责人**：王舟  
 **邮箱**：main@mails.wedevs.org  
 **电话**：15378391447

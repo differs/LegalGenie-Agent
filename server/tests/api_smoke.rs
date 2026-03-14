@@ -121,6 +121,47 @@ async fn smoke_flow_creates_audit_logs() {
         .expect("evidence id")
         .to_string();
 
+    // Wait for async parse completion so the parsed artifact is available.
+    let detail = wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    assert_eq!(detail.0, StatusCode::OK);
+    assert_eq!(
+        detail.1["data"]["parse_status"].as_str().unwrap_or(""),
+        "done",
+        "expected parse_status=done"
+    );
+
+    let parsed = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{evidence_id}/parsed"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(parsed.0, StatusCode::OK);
+    let ct = parsed
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/json"),
+        "expected application/json content-type, got {ct}"
+    );
+    let parsed_json: serde_json::Value = serde_json::from_slice(&parsed.2).expect("parsed json");
+    assert_eq!(
+        parsed_json["evidence_id"].as_str().unwrap_or(""),
+        evidence_id
+    );
+    assert_eq!(parsed_json["case_id"].as_str().unwrap_or(""), case_id);
+    assert_eq!(parsed_json["kind"].as_str().unwrap_or(""), "text");
+    assert!(
+        parsed_json["parsed_text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("hello from tests"),
+        "expected parsed_text to contain uploaded content"
+    );
+
     // Link evidence to node.
     let link_resp = request_json(
         &app,
@@ -603,6 +644,37 @@ async fn wait_for_target_history(
         app,
         Method::GET,
         &format!("/api/v1/logs/{target_type}/{target_id}/history"),
+        Some(bearer),
+        json!({}),
+    )
+    .await
+}
+
+async fn wait_for_file_parse_done(
+    app: &axum::Router,
+    bearer: &str,
+    file_id: &str,
+) -> (StatusCode, serde_json::Value) {
+    for _ in 0..50 {
+        let resp = request_json(
+            app,
+            Method::GET,
+            &format!("/api/v1/files/{file_id}"),
+            Some(bearer),
+            json!({}),
+        )
+        .await;
+        let status = resp.1["data"]["parse_status"].as_str().unwrap_or("");
+        if resp.0 == StatusCode::OK && status == "done" {
+            return resp;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    request_json(
+        app,
+        Method::GET,
+        &format!("/api/v1/files/{file_id}"),
         Some(bearer),
         json!({}),
     )
