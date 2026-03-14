@@ -243,6 +243,28 @@ async fn smoke_flow_creates_audit_logs() {
         .unwrap_or("");
     assert!(ct.starts_with("text/csv"));
 
+    let logs_export_xlsx = request_raw(
+        &app,
+        Method::GET,
+        &format!("/api/v1/logs/export?case_id={case_id}&format=excel"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(logs_export_xlsx.0, StatusCode::OK);
+    let ct = logs_export_xlsx
+        .1
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "expected xlsx content-type, got {ct}"
+    );
+    assert!(
+        logs_export_xlsx.2.starts_with(b"PK"),
+        "expected XLSX signature"
+    );
+
     // Audit logs are inserted asynchronously; wait until they show up.
     let logs = wait_for_case_logs(&app, &token, &case_id, 3).await;
     assert_eq!(logs.0, StatusCode::OK);

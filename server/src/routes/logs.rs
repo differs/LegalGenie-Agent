@@ -13,6 +13,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
 use uuid::Uuid;
@@ -147,8 +148,7 @@ async fn export_logs(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    // We only support CSV for now. `format=excel` is accepted for compatibility.
-    let _format = q
+    let format = q
         .format
         .as_deref()
         .unwrap_or("csv")
@@ -202,26 +202,6 @@ async fn export_logs(
             .map_err(|e| AppError::internal(format!("db error: {e}")))?
     };
 
-    let mut csv = String::new();
-    csv.push_str("id,user_id,user_name,case_id,action,module,target_type,target_id,target_title,changed_fields,ip_address,created_at\n");
-    for r in &rows {
-        csv.push_str(&csv_row(&[
-            &r.id,
-            &r.user_id,
-            &r.user_name,
-            r.case_id.as_deref().unwrap_or(""),
-            &r.action,
-            &r.module,
-            &r.target_type,
-            r.target_id.as_deref().unwrap_or(""),
-            r.target_title.as_deref().unwrap_or(""),
-            r.changed_fields.as_deref().unwrap_or(""),
-            r.ip_address.as_deref().unwrap_or(""),
-            &r.created_at,
-        ]));
-        csv.push('\n');
-    }
-
     // Audit log for export action (does not include exported content).
     spawn_operation_log(
         state.pool.clone(),
@@ -238,6 +218,7 @@ async fn export_logs(
             new_value: Some(serde_json::json!({
                 "row_count": rows.len(),
                 "max_rows": MAX_EXPORT_ROWS,
+                "format": format.clone(),
             })),
             changed_fields: None,
             ip_address: meta.ip_address,
@@ -246,26 +227,144 @@ async fn export_logs(
         },
     );
 
-    let file_name = format!(
-        "operation_logs_{}.csv",
-        chrono::Utc::now().format("%Y%m%d_%H%M%S")
-    );
+    match format.as_str() {
+        "" | "csv" => {
+            let mut csv = String::new();
+            csv.push_str("id,user_id,user_name,case_id,action,module,target_type,target_id,target_title,changed_fields,ip_address,created_at\n");
+            for r in &rows {
+                csv.push_str(&csv_row(&[
+                    &r.id,
+                    &r.user_id,
+                    &r.user_name,
+                    r.case_id.as_deref().unwrap_or(""),
+                    &r.action,
+                    &r.module,
+                    &r.target_type,
+                    r.target_id.as_deref().unwrap_or(""),
+                    r.target_title.as_deref().unwrap_or(""),
+                    r.changed_fields.as_deref().unwrap_or(""),
+                    r.ip_address.as_deref().unwrap_or(""),
+                    &r.created_at,
+                ]));
+                csv.push('\n');
+            }
 
-    let bytes = csv.into_bytes();
-    let body = Body::from(bytes);
-    let mut resp = Response::new(body);
+            let file_name = format!(
+                "operation_logs_{}.csv",
+                chrono::Utc::now().format("%Y%m%d_%H%M%S")
+            );
 
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/csv; charset=utf-8"),
-    );
+            let bytes = csv.into_bytes();
+            let body = Body::from(bytes);
+            let mut resp = Response::new(body);
 
-    let cd = format!("attachment; filename=\"{}\"", sanitize_filename(&file_name));
-    if let Ok(v) = cd.parse::<HeaderValue>() {
-        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/csv; charset=utf-8"),
+            );
+
+            let cd = format!("attachment; filename=\"{}\"", sanitize_filename(&file_name));
+            if let Ok(v) = cd.parse::<HeaderValue>() {
+                resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+            }
+
+            Ok(resp)
+        }
+        "excel" | "xlsx" => {
+            let mut workbook = Workbook::new();
+            let worksheet = workbook.add_worksheet();
+            let _ = worksheet.set_name("Operation Logs");
+
+            let headers = [
+                "id",
+                "user_id",
+                "user_name",
+                "case_id",
+                "action",
+                "module",
+                "target_type",
+                "target_id",
+                "target_title",
+                "changed_fields",
+                "ip_address",
+                "created_at",
+            ];
+            for (col, h) in headers.iter().enumerate() {
+                worksheet
+                    .write_string(0, col as u16, *h)
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+            }
+
+            for (idx, r) in rows.iter().enumerate() {
+                let row = (idx + 1) as u32;
+                worksheet
+                    .write_string(row, 0, &r.id)
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 1, &r.user_id)
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 2, &r.user_name)
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 3, r.case_id.as_deref().unwrap_or(""))
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 4, &r.action)
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 5, &r.module)
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 6, &r.target_type)
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 7, r.target_id.as_deref().unwrap_or(""))
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 8, r.target_title.as_deref().unwrap_or(""))
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 9, r.changed_fields.as_deref().unwrap_or(""))
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 10, r.ip_address.as_deref().unwrap_or(""))
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+                worksheet
+                    .write_string(row, 11, &r.created_at)
+                    .map_err(|e| AppError::internal(format!("xlsx write failed: {e}")))?;
+            }
+
+            let bytes = workbook
+                .save_to_buffer()
+                .map_err(|e| AppError::internal(format!("xlsx save failed: {e}")))?;
+
+            let file_name = format!(
+                "operation_logs_{}.xlsx",
+                chrono::Utc::now().format("%Y%m%d_%H%M%S")
+            );
+
+            let body = Body::from(bytes);
+            let mut resp = Response::new(body);
+
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+            );
+
+            let cd = format!("attachment; filename=\"{}\"", sanitize_filename(&file_name));
+            if let Ok(v) = cd.parse::<HeaderValue>() {
+                resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+            }
+
+            Ok(resp)
+        }
+        other => Err(AppError::bad_request(format!(
+            "unsupported format: {other} (supported: csv, excel)"
+        ))),
     }
-
-    Ok(resp)
 }
 
 #[derive(Debug, sqlx::FromRow)]
