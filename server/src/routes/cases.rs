@@ -18,6 +18,7 @@ pub fn router() -> Router<AppState> {
         .route("/:id", get(get_case).put(update_case).delete(delete_case))
         .merge(super::case_files::router())
         .merge(super::case_members::router())
+        .merge(super::case_persons::router())
         .merge(super::case_timeline::router())
 }
 

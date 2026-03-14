@@ -7,11 +7,13 @@ use tower_http::trace::TraceLayer;
 mod auth;
 mod case_files;
 mod case_members;
+mod case_persons;
 mod case_timeline;
 mod cases;
 mod files;
 mod health;
 mod logs;
+mod persons;
 mod search;
 mod timeline;
 
@@ -21,6 +23,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/auth", auth::router())
         .nest("/cases", cases::router())
         .nest("/files", files::router())
+        .nest("/persons", persons::router())
         .nest("/search", search::router())
         .nest("/timeline", timeline::router())
         .nest("/logs", logs::router());

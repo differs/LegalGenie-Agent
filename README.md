@@ -44,3 +44,4 @@ Server health check: `GET /api/v1/health`
 - Search: `GET /api/v1/search`, `GET /api/v1/search/cases`, `GET /api/v1/search/evidence`, `GET /api/v1/search/nodes`, `GET /api/v1/search/suggestions`, `GET /api/v1/search/history`, `DELETE /api/v1/search/history`
 - Timeline: `GET /api/v1/cases/:case_id/timeline/nodes`, `POST /api/v1/cases/:case_id/timeline/nodes`, `PUT /api/v1/timeline/nodes/:id`, `DELETE /api/v1/timeline/nodes/:id`, `POST /api/v1/timeline/nodes/:id/move`, `POST /api/v1/timeline/nodes/:id/evidence`, `DELETE /api/v1/timeline/nodes/:id/evidence/:link_id`
 - Logs: `GET /api/v1/logs`, `GET /api/v1/logs/:target_type/:target_id/history`
+- Persons: `GET /api/v1/cases/:case_id/persons`, `POST /api/v1/cases/:case_id/persons`, `GET /api/v1/cases/:case_id/persons/graph`, `GET /api/v1/persons/:id`, `PUT /api/v1/persons/:id`, `DELETE /api/v1/persons/:id`, `POST /api/v1/persons/:id/cases`

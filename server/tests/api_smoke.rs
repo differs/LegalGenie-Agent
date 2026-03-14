@@ -69,6 +69,42 @@ async fn smoke_flow_creates_audit_logs() {
         .expect("node id")
         .to_string();
 
+    // Create a person in the case.
+    let person_resp = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/cases/{case_id}/persons"),
+        Some(&token),
+        json!({
+            "name": "Zhang San",
+            "gender": "male",
+            "phone": "13800138000",
+            "organization": "ACME",
+            "position": "CEO",
+            "role_type": "plaintiff",
+        }),
+    )
+    .await;
+    assert_eq!(person_resp.0, StatusCode::OK);
+    let person_id = person_resp.1["data"]["id"]
+        .as_str()
+        .expect("person id")
+        .to_string();
+
+    let person_detail = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/persons/{person_id}"),
+        Some(&token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(person_detail.0, StatusCode::OK);
+    assert_eq!(
+        person_detail.1["data"]["name"].as_str().unwrap_or(""),
+        "Zhang San"
+    );
+
     // Upload a small text file (no external parsers required).
     let upload_resp = request_multipart_text(
         &app,
