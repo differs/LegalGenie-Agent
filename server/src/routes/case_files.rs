@@ -186,11 +186,6 @@ async fn upload_case_file(
         .map(str::to_string)
         .ok_or_else(|| AppError::bad_request("missing filename"))?;
 
-    let file_type = field
-        .content_type()
-        .map(|m| m.to_string())
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-
     let data = field
         .bytes()
         .await
@@ -199,6 +194,8 @@ async fn upload_case_file(
     if data.len() as u64 > state.config.max_file_size {
         return Err(AppError::bad_request("file too large"));
     }
+
+    let file_type = crate::file_security::validate_upload(&data, &original_name)?;
 
     let stored_name = generate_stored_name(&original_name);
     let storage_path = format!("files/{}/{}", case_id, stored_name);

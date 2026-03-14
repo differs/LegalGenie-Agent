@@ -411,6 +411,7 @@ async fn export_evidence_list(
 async fn download_export(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path((case_id, export_id)): Path<(String, String)>,
 ) -> AppResult<Response> {
     let case_id = normalize_uuid(&case_id, "invalid case_id")?;
@@ -418,8 +419,8 @@ async fn download_export(
 
     let export_id = normalize_uuid(&export_id, "invalid export id")?;
 
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT file_name, storage_path FROM export_records WHERE id = ?1 AND case_id = ?2 LIMIT 1",
+    let row: Option<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT export_type, file_name, storage_path, file_size FROM export_records WHERE id = ?1 AND case_id = ?2 LIMIT 1",
     )
     .bind(&export_id)
     .bind(&case_id)
@@ -427,7 +428,7 @@ async fn download_export(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    let Some((file_name, storage_path)) = row else {
+    let Some((export_type, file_name, storage_path, file_size)) = row else {
         return Err(AppError::not_found("export not found"));
     };
 
@@ -435,6 +436,31 @@ async fn download_export(
     let file = tokio::fs::File::open(&full_path)
         .await
         .map_err(|_| AppError::not_found("export not found"))?;
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(case_id.clone()),
+            action: "DOWNLOAD".to_string(),
+            module: "export".to_string(),
+            target_type: "export_record".to_string(),
+            target_id: Some(export_id.clone()),
+            target_title: Some(file_name.clone()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "export_type": export_type,
+                "file_name": file_name.clone(),
+                "storage_path": storage_path.clone(),
+                "file_size": file_size,
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
 
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);

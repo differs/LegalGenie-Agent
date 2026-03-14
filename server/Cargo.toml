@@ -27,6 +27,8 @@ resvg.workspace = true
 rust_xlsxwriter.workspace = true
 printpdf.workspace = true
 base64.workspace = true
+infer.workspace = true
+mime_guess.workspace = true
 
 legalminds-shared = { path = "../shared" }
 

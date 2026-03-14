@@ -4,6 +4,7 @@ mod config;
 mod context;
 mod db;
 mod errors;
+mod file_security;
 mod oplog;
 mod parser;
 mod rate_limit;

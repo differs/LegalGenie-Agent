@@ -143,6 +143,7 @@ async fn delete_file(
 async fn download_file(
     State(state): State<AppState>,
     user: AuthUser,
+    meta: RequestMeta,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
     let id = normalize_file_id(&id)?;
@@ -152,6 +153,33 @@ async fn download_file(
     let file = tokio::fs::File::open(&full_path)
         .await
         .map_err(|_| AppError::not_found("file not found"))?;
+
+    spawn_operation_log(
+        state.pool.clone(),
+        OperationLogNew {
+            user_id: user.user_id.to_string(),
+            user_name: user.username.clone(),
+            case_id: Some(row.case_id.clone()),
+            action: "DOWNLOAD".to_string(),
+            module: "file".to_string(),
+            target_type: "evidence_file".to_string(),
+            target_id: Some(row.id.clone()),
+            target_title: Some(row.original_name.clone()),
+            old_value: None,
+            new_value: Some(serde_json::json!({
+                "id": row.id.clone(),
+                "case_id": row.case_id.clone(),
+                "original_name": row.original_name.clone(),
+                "file_type": row.file_type.clone(),
+                "file_size": row.file_size,
+                "storage_path": row.storage_path.clone(),
+            })),
+            changed_fields: None,
+            ip_address: meta.ip_address,
+            user_agent: meta.user_agent,
+            request_id: Some(meta.request_id),
+        },
+    );
 
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);

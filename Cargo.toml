@@ -35,6 +35,8 @@ resvg = { version = "0.47", default-features = false, features = ["text", "syste
 rust_xlsxwriter = "0.94"
 printpdf = { version = "0.9", default-features = true }
 base64 = "0.22"
+infer = "0.19"
+mime_guess = "2.0.5"
 
 # Frontend (Dioxus)
 dioxus = { version = "0.5", features = ["macro"] }
