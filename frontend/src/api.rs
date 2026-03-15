@@ -105,6 +105,70 @@ pub async fn post_create_case(
     env.into_data()
 }
 
+pub async fn post_upload_case_file(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<crate::models::EvidenceFileDetail, String> {
+    let url = build_url(base, &format!("/api/v1/cases/{case_id}/files"));
+    let boundary = "LMBOUNDARYf3a5d8e2b7c14b9aa1e4c7f0d9b2a6c1";
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    let body = build_upload_multipart(boundary, filename, bytes);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use gloo_net::http::Request;
+        use js_sys::Uint8Array;
+
+        let arr = Uint8Array::from(body.as_slice());
+        let req = Request::post(&url)
+            .header("Authorization", &format!("Bearer {token}"))
+            .header("Content-Type", &content_type)
+            .body(arr)
+            .map_err(|e| e.to_string())?;
+
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        let env: ApiEnvelope<crate::models::EvidenceFileDetail> = serde_json::from_str(&text)
+            .map_err(|e| {
+                format!(
+                    "http {status}: failed to parse json: {e}; body={}",
+                    truncate(&text, 512)
+                )
+            })?;
+        env.into_data()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use reqwest::Client;
+
+        let client = Client::new();
+        let resp = client
+            .post(&url)
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        let env: ApiEnvelope<crate::models::EvidenceFileDetail> = serde_json::from_str(&text)
+            .map_err(|e| {
+                format!(
+                    "http {status}: failed to parse json: {e}; body={}",
+                    truncate(&text, 512)
+                )
+            })?;
+        env.into_data()
+    }
+}
+
 pub async fn get_case_files(
     base: &str,
     token: &str,
@@ -398,6 +462,37 @@ fn sanitize_filename(raw: &str) -> String {
     let mut s = raw.replace('\\', "_").replace('/', "_").replace('"', "_");
     if s.trim().is_empty() {
         s = "download".to_string();
+    }
+    s
+}
+
+fn build_upload_multipart(boundary: &str, filename: &str, bytes: &[u8]) -> Vec<u8> {
+    // Build a simple multipart/form-data payload:
+    // field name must be `file` to match backend.
+    let filename = sanitize_upload_filename(filename);
+
+    let mut out = Vec::with_capacity(bytes.len().saturating_add(512));
+    out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    out.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    out.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    out
+}
+
+fn sanitize_upload_filename(raw: &str) -> String {
+    // Prevent header injection in Content-Disposition.
+    let mut s = raw
+        .replace('\r', "_")
+        .replace('\n', "_")
+        .replace('\\', "_")
+        .replace('"', "_");
+    if s.trim().is_empty() {
+        s = "upload.bin".to_string();
     }
     s
 }

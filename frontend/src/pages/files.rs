@@ -1,5 +1,12 @@
 use crate::{api, models, AppCtx};
 use dioxus::prelude::*;
+use std::sync::Arc;
+
+#[derive(Clone)]
+struct PickedFile {
+    name: String,
+    bytes: Arc<Vec<u8>>,
+}
 
 #[component]
 pub fn FilesPage() -> Element {
@@ -11,6 +18,9 @@ pub fn FilesPage() -> Element {
     let mut auto_refresh_scheduled = use_signal(|| false);
 
     let mut case_id_sig = ctx.case_id;
+
+    let mut picked_file = use_signal(|| None::<PickedFile>);
+    let uploading = use_signal(|| false);
 
     let list = use_resource(move || {
         let _ = refresh_tick();
@@ -46,6 +56,107 @@ pub fn FilesPage() -> Element {
             });
         }
     });
+
+    let on_pick_file = move |e: Event<FormData>| {
+        let mut status = ctx.status;
+        let mut picked_file = picked_file;
+
+        let Some(engine) = e.files() else {
+            picked_file.set(None);
+            status.set(Some("No file selected".to_string()));
+            return;
+        };
+
+        let files = engine.files();
+        let Some(name) = files.first().cloned() else {
+            picked_file.set(None);
+            status.set(Some("No file selected".to_string()));
+            return;
+        };
+
+        status.set(Some(format!("Reading file: {name}...")));
+        spawn(async move {
+            match engine.read_file(&name).await {
+                Some(bytes) => {
+                    let size = bytes.len();
+                    picked_file.set(Some(PickedFile {
+                        name: name.clone(),
+                        bytes: Arc::new(bytes),
+                    }));
+                    status.set(Some(format!("Selected: {name} ({size} bytes)")));
+                }
+                None => {
+                    picked_file.set(None);
+                    status.set(Some("Failed to read selected file".to_string()));
+                }
+            }
+        });
+    };
+
+    let on_upload = move |_| {
+        let base = ctx.api_base();
+        let token = ctx.token();
+        let case_id = ctx.case_id();
+        let picked = picked_file();
+
+        let mut status = ctx.status;
+        let mut picked_file = picked_file;
+        let mut uploading = uploading;
+        let refresh_tick = refresh_tick;
+
+        spawn(async move {
+            if token.trim().is_empty() {
+                status.set(Some("Missing access token".to_string()));
+                return;
+            }
+            if case_id.trim().is_empty() {
+                status.set(Some("Missing case_id".to_string()));
+                return;
+            }
+            let Some(picked) = picked else {
+                status.set(Some("Pick a file first".to_string()));
+                return;
+            };
+            if uploading() {
+                return;
+            }
+
+            // Backend default max size is 100MB.
+            const MAX_BYTES: usize = 100 * 1024 * 1024;
+            if picked.bytes.len() > MAX_BYTES {
+                status.set(Some("File too large (max 100MB)".to_string()));
+                return;
+            }
+
+            uploading.set(true);
+            status.set(Some("Uploading...".to_string()));
+            match api::post_upload_case_file(
+                &base,
+                token.trim(),
+                case_id.trim(),
+                &picked.name,
+                &picked.bytes,
+            )
+            .await
+            {
+                Ok(detail) => {
+                    picked_file.set(None);
+                    status.set(Some(format!(
+                        "Uploaded: {} ({})",
+                        detail.original_name, detail.parse_status
+                    )));
+                    let mut refresh_tick = refresh_tick;
+                    refresh_tick.set(refresh_tick() + 1);
+                }
+                Err(e) => status.set(Some(e)),
+            }
+            uploading.set(false);
+        });
+    };
+
+    let on_clear_pick = move |_| {
+        picked_file.set(None);
+    };
 
     let run_download = move |path: String, fallback_name: String| {
         let base = ctx.api_base();
@@ -117,7 +228,7 @@ pub fn FilesPage() -> Element {
 
             div { class: "grid",
                 div { class: "card",
-                    h3 { "Context" }
+                    h3 { "Upload" }
                     label { "Case ID"
                         input {
                             value: ctx.case_id(),
@@ -125,8 +236,24 @@ pub fn FilesPage() -> Element {
                             oninput: move |e| case_id_sig.set(e.value()),
                         }
                     }
+                    label { "File"
+                        input {
+                            r#type: "file",
+                            accept: ".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.mp3,.wav,.txt,.json",
+                            onchange: on_pick_file,
+                        }
+                    }
+                    if let Some(p) = picked_file() {
+                        p { class: "muted",
+                            "Selected: "
+                            code { "{p.name}" }
+                            "  {p.bytes.len()} bytes"
+                        }
+                    }
                     div { class: "actions",
-                        button { class: "btn btn--accent", onclick: move |_| refresh_tick.set(refresh_tick() + 1), "Refresh" }
+                        button { class: "btn btn--accent", disabled: uploading(), onclick: on_upload, "Upload" }
+                        button { class: "btn btn--ghost", disabled: uploading(), onclick: on_clear_pick, "Clear" }
+                        button { class: "btn btn--ghost", disabled: uploading(), onclick: move |_| refresh_tick.set(refresh_tick() + 1), "Refresh" }
                     }
                 }
 
