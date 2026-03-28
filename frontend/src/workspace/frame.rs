@@ -40,7 +40,11 @@ pub struct WorkspaceFrameBindings {
 }
 
 #[component]
-pub fn WorkspaceFrame(view: WorkspaceFrameViewData, bindings: WorkspaceFrameBindings) -> Element {
+pub fn WorkspaceFrame(
+    view: WorkspaceFrameViewData,
+    bindings: WorkspaceFrameBindings,
+    on_start_conversation: EventHandler<String>,
+) -> Element {
     let WorkspaceFrameViewData {
         active_tab,
         session_line,
@@ -81,6 +85,7 @@ pub fn WorkspaceFrame(view: WorkspaceFrameViewData, bindings: WorkspaceFrameBind
                 conversation,
                 action_summaries,
                 inserted_contexts,
+                on_use_starter: on_start_conversation,
             }
             section { class: "workspace-placeholder workspace-placeholder--right card",
                 h3 { "Right Panel Placeholder" }

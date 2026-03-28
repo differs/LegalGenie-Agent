@@ -16,6 +16,7 @@ pub fn ConversationPane(
     conversation: ConversationViewModel,
     action_summaries: Vec<SuggestedActionSummaryViewModel>,
     inserted_contexts: Vec<InsertedContextViewModel>,
+    on_use_starter: EventHandler<String>,
 ) -> Element {
     rsx! {
         main { class: "conversation-pane",
@@ -70,9 +71,16 @@ pub fn ConversationPane(
                     div { class: "card__topline",
                         h3 { "Starter Prompts" }
                     }
-                    ul { class: "command-deck__insights",
+                    div { class: "quick-entry-grid",
                         for prompt in conversation.starter_prompts {
-                            li { "{prompt}" }
+                            button {
+                                class: "quick-entry-card",
+                                onclick: {
+                                    let prompt_text = prompt.to_string();
+                                    move |_| on_use_starter.call(prompt_text.clone())
+                                },
+                                "{prompt}"
+                            }
                         }
                     }
                 }

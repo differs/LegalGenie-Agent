@@ -87,6 +87,7 @@ fn App() -> Element {
     let mut tab = use_signal(|| Tab::Brief);
     let mut show_devtools = use_signal(|| false);
     let history_scope = use_signal(|| HistoryScope::CurrentCase);
+    let conversation_items = use_signal(Vec::<String>::new);
 
     provide_context(AppCtx {
         api_base,
@@ -286,7 +287,12 @@ fn App() -> Element {
         username: user().as_ref().map(|u| u.username.clone()),
     };
     let action_queue = build_action_queue(&shell_state);
-    let conversation = conversation_view_model(ConversationStage::Empty);
+    let conversation_stage = if conversation_items().is_empty() {
+        ConversationStage::Empty
+    } else {
+        ConversationStage::Active
+    };
+    let conversation = conversation_view_model(conversation_stage);
     let history_scope_value = history_scope();
     let history_items = vec![
         left_rail_history_item("会话 A", history_scope_value, Some("劳动争议案")),
@@ -334,6 +340,12 @@ fn App() -> Element {
                 bindings: workspace::frame::WorkspaceFrameBindings {
                     tab,
                     history_scope,
+                },
+                on_start_conversation: move |prompt: String| {
+                    let mut items = conversation_items;
+                    let mut status = status;
+                    items.write().push(prompt.clone());
+                    status.set(Some(format!("Started local conversation from starter: {prompt}")));
                 },
             }
         } else {
