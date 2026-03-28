@@ -1369,7 +1369,59 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
 .history__meta{display:flex;gap:10px;align-items:center;margin-bottom:8px;}
 .history__changes{max-height:240px;overflow:auto;margin:0;background:rgba(15,23,42,0.92);color:#e2e8f0;padding:10px;border-radius:12px;}
 
+.workspace-shell{
+  min-height:100vh;
+  display:grid;
+  grid-template-columns:300px minmax(0, 1fr) 320px;
+  gap:14px;
+  padding:14px;
+}
+.left-rail{
+  border:1px solid var(--line);
+  background:var(--paper);
+  border-radius:20px;
+  padding:14px;
+  display:grid;
+  gap:12px;
+  align-content:start;
+}
+.left-rail__brand{display:flex;gap:10px;align-items:center;}
+.left-rail__card{
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:10px;
+  background:rgba(255,255,255,0.7);
+}
+.left-rail__scope{display:flex;justify-content:space-between;gap:10px;align-items:center;}
+.left-rail__scope-actions{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;}
+.left-rail__history{display:grid;gap:8px;}
+.left-rail__history-item{
+  border:1px solid var(--line);
+  border-radius:12px;
+  padding:8px;
+}
+.conversation-pane{
+  display:grid;
+  gap:12px;
+  align-content:start;
+}
+.conversation-pane__header{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;}
+.context-block{
+  border:1px solid var(--line);
+  border-radius:12px;
+  padding:10px;
+  background:rgba(255,255,255,0.68);
+}
+.context-block__meta{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px;}
+.workspace-placeholder{
+  min-height:180px;
+  display:grid;
+  align-content:start;
+}
+
 @media (max-width: 1360px){
+  .workspace-shell{grid-template-columns:280px minmax(0, 1fr);}
+  .workspace-placeholder{grid-column:1 / -1;}
   .command-deck{grid-template-columns:1fr 1fr;}
   .command-deck__context{grid-column:1 / -1;}
   .brief-grid{grid-template-columns:1fr;}
@@ -1378,6 +1430,7 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
 }
 
 @media (max-width: 1100px){
+  .workspace-shell{grid-template-columns:1fr;}
   .shell{grid-template-columns:1fr;}
   .shell__sidebar{
     position:static;
