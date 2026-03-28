@@ -87,7 +87,8 @@ fn App() -> Element {
     let mut tab = use_signal(|| Tab::Brief);
     let mut show_devtools = use_signal(|| false);
     let history_scope = use_signal(|| HistoryScope::CurrentCase);
-    let conversation_items = use_signal(Vec::<String>::new);
+    let mut conversation_items = use_signal(Vec::<String>::new);
+    let mut conversation_context_key = use_signal(String::new);
 
     provide_context(AppCtx {
         api_base,
@@ -167,6 +168,15 @@ fn App() -> Element {
         }
     });
 
+    // Keep local conversation state scoped to the current token/case context.
+    use_effect(move || {
+        let key = format!("{}::{}", token().trim(), case_id().trim());
+        if conversation_context_key() != key {
+            conversation_items.set(Vec::new());
+            conversation_context_key.set(key);
+        }
+    });
+
     let mut login_username = use_signal(String::new);
     let mut login_password = use_signal(String::new);
 
@@ -180,6 +190,7 @@ fn App() -> Element {
         let mut user = user;
         let mut session_refresh_tick = session_refresh_tick;
         let mut tab = tab;
+        let mut conversation_items = conversation_items;
         spawn(async move {
             status.set(Some("Logging in...".to_string()));
             match api::post_login(&base, &username, &password).await {
@@ -187,6 +198,7 @@ fn App() -> Element {
                     token.set(data.access_token.clone());
                     token_draft.set(data.access_token);
                     user.set(None);
+                    conversation_items.set(Vec::new());
                     session_refresh_tick.set(session_refresh_tick() + 1);
                     tab.set(Tab::Brief);
                     status.set(Some("Login succeeded. Verifying session...".to_string()));
@@ -214,6 +226,7 @@ fn App() -> Element {
         let mut session_refresh_tick = session_refresh_tick;
         let mut auth_mode = auth_mode;
         let mut tab = tab;
+        let mut conversation_items = conversation_items;
         spawn(async move {
             if username.trim().is_empty() || email.trim().is_empty() {
                 status.set(Some("username/email required".to_string()));
@@ -232,6 +245,7 @@ fn App() -> Element {
                     token.set(data.access_token.clone());
                     token_draft.set(data.access_token);
                     user.set(None);
+                    conversation_items.set(Vec::new());
                     session_refresh_tick.set(session_refresh_tick() + 1);
                     auth_mode.set(AuthMode::Login);
                     tab.set(Tab::Brief);
@@ -265,6 +279,7 @@ fn App() -> Element {
         token_draft.set(String::new());
         user.set(None);
         case_id.set(String::new());
+        conversation_items.set(Vec::new());
         session_refresh_tick.set(session_refresh_tick() + 1);
         status.set(Some("Cleared connection state".to_string()));
     };
