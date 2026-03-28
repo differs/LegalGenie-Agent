@@ -225,8 +225,8 @@ impl WorkspaceState {
     pub fn toggle_panel_collapsed(mut self) -> Self {
         self.right_panel.mode = match self.right_panel.mode {
             PanelMode::Collapsed => PanelMode::Expanded,
+            PanelMode::Expanded => PanelMode::Collapsed,
             PanelMode::Pinned => PanelMode::Pinned,
-            _ => PanelMode::Collapsed,
         };
         self
     }
@@ -775,6 +775,15 @@ mod tests {
         assert_eq!(actions[1].risk, ActionRisk::ReviewRequired);
         assert_eq!(actions[2].risk, ActionRisk::Guarded);
         assert_eq!(actions[2].intent, ActionIntent::OpenPersons);
+    }
+
+    #[test]
+    fn exports_action_keeps_log_cta_and_intent_aligned() {
+        let actions = build_action_queue(&state(true, true, Some("owner"), Tab::Exports));
+
+        let sensitive_action = &actions[2];
+        assert_eq!(sensitive_action.cta, "Open Logs");
+        assert_eq!(sensitive_action.intent, ActionIntent::OpenLogs);
     }
 
     #[test]
