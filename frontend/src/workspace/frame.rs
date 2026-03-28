@@ -70,7 +70,11 @@ pub fn WorkspaceFrame(
     } = bindings;
     let active_tab = shell_state.active_tab;
     let conversation_stage = if active_tab == Tab::Brief {
-        crate::shell::ConversationStage::Active
+        if shell_state.has_case {
+            crate::shell::ConversationStage::Active
+        } else {
+            crate::shell::ConversationStage::Empty
+        }
     } else {
         crate::shell::ConversationStage::Empty
     };
