@@ -15,6 +15,7 @@ pub fn LeftRail(
     history_scope: HistoryScope,
     history_items: Vec<LeftRailHistoryItemViewModel>,
     mut tab: Signal<Tab>,
+    mut history_scope_signal: Signal<HistoryScope>,
 ) -> Element {
     let primary_entries = left_rail_primary_entries();
     let scope_vm = left_rail_view_model(history_scope);
@@ -55,8 +56,24 @@ pub fn LeftRail(
                     span { class: "badge", "{scope_vm.active_scope_label}" }
                 }
                 div { class: "left-rail__scope-actions",
-                    button { class: "btn btn--ghost btn--small", "{history_scope_label(HistoryScope::CurrentCase)}" }
-                    button { class: "btn btn--ghost btn--small", "{history_scope_label(HistoryScope::AllConversations)}" }
+                    button {
+                        class: if history_scope == HistoryScope::CurrentCase {
+                            "btn btn--accent btn--small"
+                        } else {
+                            "btn btn--ghost btn--small"
+                        },
+                        onclick: move |_| history_scope_signal.set(HistoryScope::CurrentCase),
+                        "{history_scope_label(HistoryScope::CurrentCase)}"
+                    }
+                    button {
+                        class: if history_scope == HistoryScope::AllConversations {
+                            "btn btn--accent btn--small"
+                        } else {
+                            "btn btn--ghost btn--small"
+                        },
+                        onclick: move |_| history_scope_signal.set(HistoryScope::AllConversations),
+                        "{history_scope_label(HistoryScope::AllConversations)}"
+                    }
                 }
                 div { class: "left-rail__history",
                     for item in history_items {

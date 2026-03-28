@@ -7,8 +7,12 @@ mod workspace;
 use dioxus::prelude::*;
 use models::UserInfo;
 use shell::{
-    auth_gate_label, build_action_queue, build_operator_panel, build_shell_brief, derive_auth_gate,
-    workspace_tab_for_auth_gate, AuthGate, Tab,
+    auth_gate_label, build_action_queue, derive_auth_gate, workspace_tab_for_auth_gate, AuthGate,
+    ConversationStage, HistoryScope, ObjectKind, Tab,
+};
+use workspace::view_model::{
+    conversation_view_model, inserted_context_view_model, left_rail_history_item,
+    suggested_action_summaries,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -82,6 +86,7 @@ fn App() -> Element {
     let mut status = use_signal(|| None::<String>);
     let mut tab = use_signal(|| Tab::Brief);
     let mut show_devtools = use_signal(|| false);
+    let history_scope = use_signal(|| HistoryScope::CurrentCase);
 
     provide_context(AppCtx {
         api_base,
@@ -254,15 +259,6 @@ fn App() -> Element {
         status.set(Some("Verifying session via /auth/me...".to_string()));
     };
 
-    let on_me = move |_| {
-        if token().trim().is_empty() {
-            status.set(Some("Missing active access token".to_string()));
-            return;
-        }
-        session_refresh_tick.set(session_refresh_tick() + 1);
-        status.set(Some("Revalidating session via /auth/me...".to_string()));
-    };
-
     let on_clear_connection = move |_| {
         token.set(String::new());
         token_draft.set(String::new());
@@ -270,18 +266,6 @@ fn App() -> Element {
         case_id.set(String::new());
         session_refresh_tick.set(session_refresh_tick() + 1);
         status.set(Some("Cleared connection state".to_string()));
-    };
-
-    let on_logout = move |_| {
-        token.set(String::new());
-        token_draft.set(String::new());
-        user.set(None);
-        case_id.set(String::new());
-        session_refresh_tick.set(session_refresh_tick() + 1);
-        tab.set(Tab::Brief);
-        show_devtools.set(false);
-        auth_mode.set(AuthMode::Login);
-        status.set(Some("Logged out (local)".to_string()));
     };
 
     let active_token = token();
@@ -301,8 +285,20 @@ fn App() -> Element {
         active_tab,
         username: user().as_ref().map(|u| u.username.clone()),
     };
-    let brief = build_shell_brief(&shell_state);
     let action_queue = build_action_queue(&shell_state);
+    let conversation = conversation_view_model(ConversationStage::Empty);
+    let history_scope_value = history_scope();
+    let history_items = vec![
+        left_rail_history_item("会话 A", history_scope_value, Some("劳动争议案")),
+        left_rail_history_item("会话 B", history_scope_value, Some("民间借贷案")),
+        left_rail_history_item("会话 C", history_scope_value, Some("建设工程纠纷案")),
+    ];
+    let action_summaries = suggested_action_summaries(&action_queue);
+    let inserted_contexts = vec![inserted_context_view_model(
+        "付款节点",
+        ObjectKind::TimelineNode,
+        false,
+    )];
     let session_line = ctx_user_line(user()).unwrap_or_else(|| match auth_gate {
         AuthGate::Ready => "Signed in with verified session".to_string(),
         AuthGate::Verifying => "Waiting for /auth/me verification".to_string(),
@@ -311,8 +307,6 @@ fn App() -> Element {
     let (role_badge_text, role_badge_class) =
         case_role_badge(current_role.as_deref(), case_role_loading());
     let case_label_text = current_case_label(&selected_case_id);
-    let operator_panel = build_operator_panel(&shell_state, auth_gate, &case_label_text);
-    let operator_avatar = operator_initials(&operator_panel.title);
     let (auth_gate_badge_text, auth_gate_badge_class) = match auth_gate {
         AuthGate::SignedOut => (auth_gate_label(auth_gate), "badge"),
         AuthGate::Verifying => (auth_gate_label(auth_gate), "badge badge--run"),
@@ -324,31 +318,23 @@ fn App() -> Element {
         if connected {
             workspace::frame::WorkspaceFrame {
                 view: workspace::frame::WorkspaceFrameViewData {
-                    shell_state,
-                    brief,
-                    action_queue,
-                    operator_panel,
+                    active_tab,
                     session_line,
                     case_label_text,
                     role_badge_text,
                     role_badge_class,
                     auth_gate_badge_text,
                     auth_gate_badge_class,
-                    operator_avatar,
+                    history_scope: history_scope_value,
+                    history_items,
+                    conversation,
+                    action_summaries,
+                    inserted_contexts,
                 },
                 bindings: workspace::frame::WorkspaceFrameBindings {
-                    session_verifying,
-                    api_base,
-                    token_draft,
-                    case_id,
                     tab,
-                    show_devtools,
-                    status,
+                    history_scope,
                 },
-                on_me,
-                on_logout,
-                on_apply_token,
-                on_clear_connection,
             }
         } else {
             div { class: "auth-shell",
@@ -501,17 +487,6 @@ fn current_case_label(case_id: &str) -> String {
     } else {
         format!("Case {trimmed}")
     }
-}
-
-fn operator_initials(title: &str) -> String {
-    let mut chars = title.chars().filter(|c| c.is_alphanumeric());
-    let first = chars.next().unwrap_or('L');
-    let second = chars.next().unwrap_or(first);
-    format!(
-        "{}{}",
-        first.to_ascii_uppercase(),
-        second.to_ascii_uppercase()
-    )
 }
 
 fn case_role_badge(role: Option<&str>, loading: bool) -> (&'static str, &'static str) {
@@ -1377,6 +1352,8 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
   padding:14px;
 }
 .left-rail{
+  grid-column:1;
+  grid-row:1 / span 2;
   border:1px solid var(--line);
   background:var(--paper);
   border-radius:20px;
@@ -1401,6 +1378,8 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
   padding:8px;
 }
 .conversation-pane{
+  grid-column:2;
+  grid-row:1;
   display:grid;
   gap:12px;
   align-content:start;
@@ -1430,9 +1409,21 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
   display:grid;
   align-content:start;
 }
+.workspace-placeholder--right{
+  grid-column:3;
+  grid-row:1;
+}
+.workspace-placeholder--canvas{
+  grid-column:2 / 4;
+  grid-row:2;
+}
 
 @media (max-width: 1360px){
   .workspace-shell{grid-template-columns:280px minmax(0, 1fr);}
+  .left-rail,.conversation-pane,.workspace-placeholder--right,.workspace-placeholder--canvas{
+    grid-column:auto;
+    grid-row:auto;
+  }
   .workspace-placeholder{grid-column:1 / -1;}
   .command-deck{grid-template-columns:1fr 1fr;}
   .command-deck__context{grid-column:1 / -1;}
@@ -1443,6 +1434,10 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
 
 @media (max-width: 1100px){
   .workspace-shell{grid-template-columns:1fr;}
+  .left-rail,.conversation-pane,.workspace-placeholder--right,.workspace-placeholder--canvas{
+    grid-column:auto;
+    grid-row:auto;
+  }
   .quick-entry-grid{grid-template-columns:repeat(2, minmax(0, 1fr));}
   .shell{grid-template-columns:1fr;}
   .shell__sidebar{
