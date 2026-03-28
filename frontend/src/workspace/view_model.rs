@@ -71,6 +71,16 @@ pub fn left_rail_view_model(has_case: bool, scope: HistoryScope) -> LeftRailView
     }
 }
 
+pub fn left_rail_view_model_default(
+    has_case: bool,
+    scope: Option<HistoryScope>,
+) -> LeftRailViewModel {
+    left_rail_view_model(
+        has_case,
+        scope.unwrap_or(HistoryScope::CurrentCase),
+    )
+}
+
 pub fn left_rail_history_item(
     title: &str,
     scope: HistoryScope,
@@ -116,24 +126,42 @@ mod tests {
 
     #[test]
     fn quick_entry_cards_are_always_visible_in_conversation_view() {
-        let vm = conversation_view_model(true, ConversationStage::Empty);
-        assert_eq!(vm.quick_entries.len(), 4);
+        let empty_vm = conversation_view_model(true, ConversationStage::Empty);
+        let active_vm = conversation_view_model(true, ConversationStage::Active);
+        assert_eq!(empty_vm.quick_entries.len(), 4);
+        assert_eq!(active_vm.quick_entries.len(), 4);
+        assert_eq!(
+            empty_vm
+                .quick_entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            active_vm
+                .quick_entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn left_rail_defaults_to_current_case_history() {
-        let vm = left_rail_view_model(true, HistoryScope::CurrentCase);
+        let vm = left_rail_view_model_default(true, None);
         assert_eq!(vm.active_scope_label, "Current case");
     }
 
     #[test]
     fn all_conversation_entries_show_their_case_label() {
-        let vm = left_rail_history_item(
-            "会话 A",
-            HistoryScope::AllConversations,
-            Some("劳动争议案"),
-        );
-        assert_eq!(vm.case_label.as_deref(), Some("劳动争议案"));
+        let entries = vec!["会话 A", "会话 B", "会话 C"];
+        let vm_items = entries
+            .iter()
+            .map(|title| {
+                left_rail_history_item(title, HistoryScope::AllConversations, Some("劳动争议案"))
+            })
+            .collect::<Vec<_>>();
+        assert!(vm_items
+            .iter()
+            .all(|item| item.case_label.as_deref() == Some("劳动争议案")));
     }
 
     #[test]

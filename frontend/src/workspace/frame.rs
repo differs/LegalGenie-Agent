@@ -6,6 +6,10 @@ use crate::{
         ShellAction, ShellBrief, ShellState, Tab, ALL_TABS,
     },
 };
+use super::view_model::{
+    conversation_view_model, left_rail_history_item, left_rail_view_model_default,
+    utility_entries_view_model,
+};
 
 #[component]
 pub fn WorkspaceFrame(
@@ -35,6 +39,26 @@ pub fn WorkspaceFrame(
 ) -> Element {
     let _ = auth_gate;
     let active_tab = shell_state.active_tab;
+    let conversation_stage = if active_tab == Tab::Brief {
+        crate::shell::ConversationStage::Active
+    } else {
+        crate::shell::ConversationStage::Empty
+    };
+    let conversation_vm = conversation_view_model(shell_state.has_case, conversation_stage);
+    let left_rail_vm = left_rail_view_model_default(shell_state.has_case, None);
+    let history_items = vec![
+        left_rail_history_item(
+            "Latest workspace run",
+            crate::shell::HistoryScope::CurrentCase,
+            Some(&case_label_text),
+        ),
+        left_rail_history_item(
+            "Prior conversation",
+            crate::shell::HistoryScope::CurrentCase,
+            Some(&case_label_text),
+        ),
+    ];
+    let utility_entries = utility_entries_view_model();
     let selected_case_id = case_id();
     let workspace_brief = brief.clone();
     let workspace_actions = action_queue.clone();
@@ -57,7 +81,11 @@ pub fn WorkspaceFrame(
                 }
 
                 nav { class: "navrail",
-                    for nav_tab in ALL_TABS.iter().copied() {
+                    for nav_tab in ALL_TABS
+                        .iter()
+                        .copied()
+                        .filter(|tab| !matches!(tab, Tab::Search | Tab::Logs))
+                    {
                         button {
                             class: if active_tab == nav_tab {
                                 "navrail__btn navrail__btn--active"
@@ -69,6 +97,42 @@ pub fn WorkspaceFrame(
                                 move |_| tab.set(nav_tab)
                             },
                             span { class: "navrail__label", "{tab_label(nav_tab)}" }
+                        }
+                    }
+                }
+
+                div { class: "shell__sidebar-card",
+                    span { class: "eyebrow", "Conversation Scope" }
+                    p { class: "muted", "{left_rail_vm.active_scope_label}" }
+                    for item in history_items.iter() {
+                        div {
+                            strong { "{item.title}" }
+                            if let Some(case_label) = item.case_label.as_deref() {
+                                p { class: "muted", "{case_label}" }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "shell__sidebar-card",
+                    span { class: "eyebrow", "Utilities" }
+                    for item in utility_entries.iter() {
+                        button {
+                            class: if utility_entry_active_tab(item.id) == Some(active_tab) {
+                                "navrail__btn navrail__btn--active"
+                            } else {
+                                "navrail__btn"
+                            },
+                            onclick: {
+                                let mut tab = tab;
+                                let target = utility_entry_active_tab(item.id);
+                                move |_| {
+                                    if let Some(tab_id) = target {
+                                        tab.set(tab_id);
+                                    }
+                                }
+                            },
+                            span { class: "navrail__label", "{item.label}" }
                         }
                     }
                 }
@@ -270,6 +334,7 @@ pub fn WorkspaceFrame(
                                 actions: workspace_actions,
                                 case_id: selected_case_id.clone(),
                                 role_in_case: shell_state.role_in_case.clone(),
+                                quick_entries: conversation_vm.quick_entries,
                                 on_action: move |intent| {
                                     apply_action_intent(intent, tab, show_devtools, status);
                                 },
@@ -301,6 +366,7 @@ fn BriefWorkspace(
     actions: Vec<ShellAction>,
     case_id: String,
     role_in_case: Option<String>,
+    quick_entries: Vec<super::view_model::QuickEntryCardViewModel>,
     on_action: EventHandler<ActionIntent>,
 ) -> Element {
     let case_summary = if case_id.trim().is_empty() {
@@ -371,8 +437,25 @@ fn BriefWorkspace(
                         }
                     }
                 }
+
+                article { class: "card",
+                    h3 { "Quick Entry" }
+                    div { class: "actions",
+                        for entry in quick_entries.iter() {
+                            button { class: "btn btn--ghost", "{entry.label}" }
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+fn utility_entry_active_tab(id: &str) -> Option<Tab> {
+    match id {
+        "search" => Some(Tab::Search),
+        "logs" => Some(Tab::Logs),
+        _ => None,
     }
 }
 
