@@ -1,4 +1,4 @@
-use crate::shell::{CanvasKind, ConversationStage, HistoryScope};
+use crate::shell::{CanvasKind, ConversationStage, HistoryScope, Tab};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuickEntryCardViewModel {
@@ -8,7 +8,6 @@ pub struct QuickEntryCardViewModel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationViewModel {
-    pub stage: ConversationStage,
     pub quick_entries: Vec<QuickEntryCardViewModel>,
 }
 
@@ -20,7 +19,6 @@ pub struct LeftRailHistoryItemViewModel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeftRailViewModel {
-    pub has_case: bool,
     pub active_scope_label: &'static str,
 }
 
@@ -28,14 +26,13 @@ pub struct LeftRailViewModel {
 pub struct UtilityEntryViewModel {
     pub id: &'static str,
     pub label: &'static str,
+    pub tab: Tab,
 }
 
 pub fn conversation_view_model(
-    _has_case: bool,
-    stage: ConversationStage,
+    _stage: ConversationStage,
 ) -> ConversationViewModel {
     ConversationViewModel {
-        stage,
         quick_entries: vec![
             QuickEntryCardViewModel {
                 id: "timeline",
@@ -64,21 +61,16 @@ pub fn history_scope_label(scope: HistoryScope) -> &'static str {
     }
 }
 
-pub fn left_rail_view_model(has_case: bool, scope: HistoryScope) -> LeftRailViewModel {
+pub fn left_rail_view_model(scope: HistoryScope) -> LeftRailViewModel {
     LeftRailViewModel {
-        has_case,
         active_scope_label: history_scope_label(scope),
     }
 }
 
 pub fn left_rail_view_model_default(
-    has_case: bool,
     scope: Option<HistoryScope>,
 ) -> LeftRailViewModel {
-    left_rail_view_model(
-        has_case,
-        scope.unwrap_or(HistoryScope::CurrentCase),
-    )
+    left_rail_view_model(scope.unwrap_or(HistoryScope::CurrentCase))
 }
 
 pub fn left_rail_history_item(
@@ -101,12 +93,26 @@ pub fn utility_entries_view_model() -> Vec<UtilityEntryViewModel> {
         UtilityEntryViewModel {
             id: "search",
             label: "Search",
+            tab: Tab::Search,
         },
         UtilityEntryViewModel {
             id: "logs",
             label: "Logs",
+            tab: Tab::Logs,
         },
     ]
+}
+
+pub fn primary_nav_tabs() -> Vec<Tab> {
+    let utility_tabs = utility_entries_view_model()
+        .into_iter()
+        .map(|entry| entry.tab)
+        .collect::<Vec<_>>();
+    crate::shell::ALL_TABS
+        .iter()
+        .copied()
+        .filter(|tab| !utility_tabs.contains(tab))
+        .collect()
 }
 
 pub fn canvas_header_title(canvas: Option<CanvasKind>) -> &'static str {
@@ -126,8 +132,8 @@ mod tests {
 
     #[test]
     fn quick_entry_cards_are_always_visible_in_conversation_view() {
-        let empty_vm = conversation_view_model(true, ConversationStage::Empty);
-        let active_vm = conversation_view_model(true, ConversationStage::Active);
+        let empty_vm = conversation_view_model(ConversationStage::Empty);
+        let active_vm = conversation_view_model(ConversationStage::Active);
         assert_eq!(empty_vm.quick_entries.len(), 4);
         assert_eq!(active_vm.quick_entries.len(), 4);
         assert_eq!(
@@ -146,7 +152,7 @@ mod tests {
 
     #[test]
     fn left_rail_defaults_to_current_case_history() {
-        let vm = left_rail_view_model_default(true, None);
+        let vm = left_rail_view_model_default(None);
         assert_eq!(vm.active_scope_label, "Current case");
     }
 
@@ -170,6 +176,16 @@ mod tests {
         assert!(vm.iter().any(|item| item.id == "search"));
         assert!(vm.iter().any(|item| item.id == "logs"));
         assert!(!vm.iter().any(|item| item.id == "timeline_nav"));
+        assert!(vm.iter().any(|item| item.tab == Tab::Search));
+        assert!(vm.iter().any(|item| item.tab == Tab::Logs));
+    }
+
+    #[test]
+    fn primary_nav_tabs_exclude_utility_tabs() {
+        let nav_tabs = primary_nav_tabs();
+        assert!(!nav_tabs.contains(&Tab::Search));
+        assert!(!nav_tabs.contains(&Tab::Logs));
+        assert!(nav_tabs.contains(&Tab::Timeline));
     }
 
     #[test]

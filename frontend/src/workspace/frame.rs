@@ -2,50 +2,80 @@ use dioxus::prelude::*;
 use crate::{
     pages,
     shell::{
-        risk_class, risk_label, tab_description, tab_label, ActionIntent, AuthGate, OperatorPanel,
-        ShellAction, ShellBrief, ShellState, Tab, ALL_TABS,
+        risk_class, risk_label, tab_description, tab_label, ActionIntent, OperatorPanel,
+        ShellAction, ShellBrief, ShellState, Tab,
     },
 };
 use super::view_model::{
     conversation_view_model, left_rail_history_item, left_rail_view_model_default,
-    utility_entries_view_model,
+    primary_nav_tabs, utility_entries_view_model, QuickEntryCardViewModel,
 };
+
+#[derive(Clone, PartialEq)]
+pub struct WorkspaceFrameViewData {
+    pub shell_state: ShellState,
+    pub brief: ShellBrief,
+    pub action_queue: Vec<ShellAction>,
+    pub operator_panel: OperatorPanel,
+    pub session_line: String,
+    pub case_label_text: String,
+    pub role_badge_text: &'static str,
+    pub role_badge_class: &'static str,
+    pub auth_gate_badge_text: &'static str,
+    pub auth_gate_badge_class: &'static str,
+    pub operator_avatar: String,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct WorkspaceFrameBindings {
+    pub session_verifying: bool,
+    pub api_base: Signal<String>,
+    pub token_draft: Signal<String>,
+    pub case_id: Signal<String>,
+    pub tab: Signal<Tab>,
+    pub show_devtools: Signal<bool>,
+    pub status: Signal<Option<String>>,
+}
 
 #[component]
 pub fn WorkspaceFrame(
-    auth_gate: AuthGate,
-    shell_state: ShellState,
-    brief: ShellBrief,
-    action_queue: Vec<ShellAction>,
-    operator_panel: OperatorPanel,
-    session_line: String,
-    case_label_text: String,
-    role_badge_text: &'static str,
-    role_badge_class: &'static str,
-    auth_gate_badge_text: &'static str,
-    auth_gate_badge_class: &'static str,
-    operator_avatar: String,
-    session_verifying: bool,
-    api_base: Signal<String>,
-    token_draft: Signal<String>,
-    case_id: Signal<String>,
-    tab: Signal<Tab>,
-    show_devtools: Signal<bool>,
-    status: Signal<Option<String>>,
+    view: WorkspaceFrameViewData,
+    bindings: WorkspaceFrameBindings,
     on_me: EventHandler<MouseEvent>,
     on_logout: EventHandler<MouseEvent>,
     on_apply_token: EventHandler<MouseEvent>,
     on_clear_connection: EventHandler<MouseEvent>,
 ) -> Element {
-    let _ = auth_gate;
+    let WorkspaceFrameViewData {
+        shell_state,
+        brief,
+        action_queue,
+        operator_panel,
+        session_line,
+        case_label_text,
+        role_badge_text,
+        role_badge_class,
+        auth_gate_badge_text,
+        auth_gate_badge_class,
+        operator_avatar,
+    } = view;
+    let WorkspaceFrameBindings {
+        session_verifying,
+        mut api_base,
+        mut token_draft,
+        mut case_id,
+        tab,
+        show_devtools,
+        status,
+    } = bindings;
     let active_tab = shell_state.active_tab;
     let conversation_stage = if active_tab == Tab::Brief {
         crate::shell::ConversationStage::Active
     } else {
         crate::shell::ConversationStage::Empty
     };
-    let conversation_vm = conversation_view_model(shell_state.has_case, conversation_stage);
-    let left_rail_vm = left_rail_view_model_default(shell_state.has_case, None);
+    let conversation_vm = conversation_view_model(conversation_stage);
+    let left_rail_vm = left_rail_view_model_default(None);
     let history_items = vec![
         left_rail_history_item(
             "Latest workspace run",
@@ -58,6 +88,7 @@ pub fn WorkspaceFrame(
             Some(&case_label_text),
         ),
     ];
+    let primary_nav_tabs = primary_nav_tabs();
     let utility_entries = utility_entries_view_model();
     let selected_case_id = case_id();
     let workspace_brief = brief.clone();
@@ -81,11 +112,7 @@ pub fn WorkspaceFrame(
                 }
 
                 nav { class: "navrail",
-                    for nav_tab in ALL_TABS
-                        .iter()
-                        .copied()
-                        .filter(|tab| !matches!(tab, Tab::Search | Tab::Logs))
-                    {
+                    for nav_tab in primary_nav_tabs.iter().copied() {
                         button {
                             class: if active_tab == nav_tab {
                                 "navrail__btn navrail__btn--active"
@@ -118,19 +145,15 @@ pub fn WorkspaceFrame(
                     span { class: "eyebrow", "Utilities" }
                     for item in utility_entries.iter() {
                         button {
-                            class: if utility_entry_active_tab(item.id) == Some(active_tab) {
+                            class: if item.tab == active_tab {
                                 "navrail__btn navrail__btn--active"
                             } else {
                                 "navrail__btn"
                             },
                             onclick: {
                                 let mut tab = tab;
-                                let target = utility_entry_active_tab(item.id);
-                                move |_| {
-                                    if let Some(tab_id) = target {
-                                        tab.set(tab_id);
-                                    }
-                                }
+                                let target = item.tab;
+                                move |_| tab.set(target)
                             },
                             span { class: "navrail__label", "{item.label}" }
                         }
@@ -366,7 +389,7 @@ fn BriefWorkspace(
     actions: Vec<ShellAction>,
     case_id: String,
     role_in_case: Option<String>,
-    quick_entries: Vec<super::view_model::QuickEntryCardViewModel>,
+    quick_entries: Vec<QuickEntryCardViewModel>,
     on_action: EventHandler<ActionIntent>,
 ) -> Element {
     let case_summary = if case_id.trim().is_empty() {
@@ -448,14 +471,6 @@ fn BriefWorkspace(
                 }
             }
         }
-    }
-}
-
-fn utility_entry_active_tab(id: &str) -> Option<Tab> {
-    match id {
-        "search" => Some(Tab::Search),
-        "logs" => Some(Tab::Logs),
-        _ => None,
     }
 }
 
