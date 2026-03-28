@@ -357,6 +357,7 @@ pub fn WorkspaceFrame(
                                 actions: workspace_actions,
                                 case_id: selected_case_id.clone(),
                                 role_in_case: shell_state.role_in_case.clone(),
+                                conversation_stage_label: conversation_vm.stage_label,
                                 quick_entries: conversation_vm.quick_entries,
                                 on_action: move |intent| {
                                     apply_action_intent(intent, tab, show_devtools, status);
@@ -389,6 +390,7 @@ fn BriefWorkspace(
     actions: Vec<ShellAction>,
     case_id: String,
     role_in_case: Option<String>,
+    conversation_stage_label: &'static str,
     quick_entries: Vec<QuickEntryCardViewModel>,
     on_action: EventHandler<ActionIntent>,
 ) -> Element {
@@ -463,6 +465,7 @@ fn BriefWorkspace(
 
                 article { class: "card",
                     h3 { "Quick Entry" }
+                    p { class: "muted", "{conversation_stage_label}" }
                     div { class: "actions",
                         for entry in quick_entries.iter() {
                             button { class: "btn btn--ghost", "{entry.label}" }

@@ -8,6 +8,7 @@ pub struct QuickEntryCardViewModel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationViewModel {
+    pub stage_label: &'static str,
     pub quick_entries: Vec<QuickEntryCardViewModel>,
 }
 
@@ -30,9 +31,13 @@ pub struct UtilityEntryViewModel {
 }
 
 pub fn conversation_view_model(
-    _stage: ConversationStage,
+    stage: ConversationStage,
 ) -> ConversationViewModel {
     ConversationViewModel {
+        stage_label: match stage {
+            ConversationStage::Empty => "Start a new conversation",
+            ConversationStage::Active => "Continue the conversation",
+        },
         quick_entries: vec![
             QuickEntryCardViewModel {
                 id: "timeline",
@@ -136,6 +141,8 @@ mod tests {
         let active_vm = conversation_view_model(ConversationStage::Active);
         assert_eq!(empty_vm.quick_entries.len(), 4);
         assert_eq!(active_vm.quick_entries.len(), 4);
+        assert_eq!(empty_vm.stage_label, "Start a new conversation");
+        assert_eq!(active_vm.stage_label, "Continue the conversation");
         assert_eq!(
             empty_vm
                 .quick_entries
