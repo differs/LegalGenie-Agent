@@ -2,20 +2,12 @@ use dioxus::prelude::*;
 
 use crate::shell::{HistoryScope, Tab};
 
+use super::conversation::ConversationPane;
+use super::left_rail::LeftRail;
 use super::view_model::{
     ConversationViewModel, InsertedContextViewModel, LeftRailHistoryItemViewModel,
     SuggestedActionSummaryViewModel,
 };
-
-#[path = "context_block.rs"]
-mod context_block;
-#[path = "conversation.rs"]
-mod conversation;
-#[path = "left_rail.rs"]
-mod left_rail;
-
-use conversation::ConversationPane;
-use left_rail::LeftRail;
 
 #[derive(Clone, PartialEq)]
 pub struct WorkspaceFrameViewData {
@@ -36,6 +28,7 @@ pub struct WorkspaceFrameViewData {
 #[derive(Clone, PartialEq)]
 pub struct WorkspaceFrameBindings {
     pub tab: Signal<Tab>,
+    pub case_id: Signal<String>,
     pub history_scope: Signal<HistoryScope>,
 }
 
@@ -61,6 +54,7 @@ pub fn WorkspaceFrame(
     } = view;
     let WorkspaceFrameBindings {
         tab,
+        case_id,
         history_scope: history_scope_signal,
     } = bindings;
 
@@ -73,6 +67,7 @@ pub fn WorkspaceFrame(
                 history_scope,
                 history_items,
                 tab,
+                case_id,
                 history_scope_signal,
             }
             ConversationPane {

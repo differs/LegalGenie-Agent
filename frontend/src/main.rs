@@ -4,6 +4,9 @@ mod pages;
 mod shell;
 mod workspace;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use dioxus::prelude::*;
 use models::UserInfo;
 use shell::{
@@ -170,7 +173,7 @@ fn App() -> Element {
 
     // Keep local conversation state scoped to the current token/case context.
     use_effect(move || {
-        let key = format!("{}::{}", token().trim(), case_id().trim());
+        let key = conversation_scope_key(token().trim(), case_id().trim());
         if conversation_context_key() != key {
             conversation_items.set(Vec::new());
             conversation_context_key.set(key);
@@ -354,6 +357,7 @@ fn App() -> Element {
                 },
                 bindings: workspace::frame::WorkspaceFrameBindings {
                     tab,
+                    case_id,
                     history_scope,
                 },
                 on_start_conversation: move |prompt: String| {
@@ -514,6 +518,13 @@ fn current_case_label(case_id: &str) -> String {
     } else {
         format!("Case {trimmed}")
     }
+}
+
+fn conversation_scope_key(token: &str, case_id: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    token.trim().hash(&mut hasher);
+    case_id.trim().hash(&mut hasher);
+    format!("ctx:{:016x}", hasher.finish())
 }
 
 fn case_role_badge(role: Option<&str>, loading: bool) -> (&'static str, &'static str) {
