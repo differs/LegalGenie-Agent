@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::shell::{HistoryScope, Tab};
+use crate::shell::{tab_description, tab_label, HistoryScope, Tab};
 
 use super::conversation::ConversationPane;
 use super::left_rail::LeftRail;
@@ -21,6 +21,7 @@ pub struct WorkspaceFrameViewData {
     pub history_scope: HistoryScope,
     pub history_items: Vec<LeftRailHistoryItemViewModel>,
     pub conversation: ConversationViewModel,
+    pub conversation_items: Vec<String>,
     pub action_summaries: Vec<SuggestedActionSummaryViewModel>,
     pub inserted_contexts: Vec<InsertedContextViewModel>,
 }
@@ -49,6 +50,7 @@ pub fn WorkspaceFrame(
         history_scope,
         history_items,
         conversation,
+        conversation_items,
         action_summaries,
         inserted_contexts,
     } = view;
@@ -70,17 +72,31 @@ pub fn WorkspaceFrame(
                 case_id,
                 history_scope_signal,
             }
-            ConversationPane {
-                case_label_text,
-                session_line,
-                role_badge_text,
-                role_badge_class,
-                auth_gate_badge_text,
-                auth_gate_badge_class,
-                conversation,
-                action_summaries,
-                inserted_contexts,
-                on_use_starter: on_start_conversation,
+            if active_tab == Tab::Brief {
+                ConversationPane {
+                    case_label_text,
+                    session_line,
+                    role_badge_text,
+                    role_badge_class,
+                    auth_gate_badge_text,
+                    auth_gate_badge_class,
+                    conversation,
+                    conversation_items,
+                    action_summaries,
+                    inserted_contexts,
+                    on_use_starter: on_start_conversation,
+                }
+            } else {
+                main { class: "conversation-pane",
+                    section { class: "card conversation-pane__header",
+                        div {
+                            span { class: "eyebrow", "Active Tab" }
+                            h2 { "{tab_label(active_tab)}" }
+                        }
+                        p { class: "muted", "{tab_description(active_tab)}" }
+                        p { class: "muted", "Task 3 placeholder mode: this tab has distinct center content while full workspace modules are pending." }
+                    }
+                }
             }
             section { class: "workspace-placeholder workspace-placeholder--right card",
                 h3 { "Right Panel Placeholder" }

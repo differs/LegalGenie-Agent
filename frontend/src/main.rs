@@ -352,6 +352,7 @@ fn App() -> Element {
                     history_scope: history_scope_value,
                     history_items,
                     conversation,
+                    conversation_items: conversation_items(),
                     action_summaries,
                     inserted_contexts,
                 },

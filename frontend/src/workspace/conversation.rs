@@ -14,6 +14,7 @@ pub fn ConversationPane(
     auth_gate_badge_text: &'static str,
     auth_gate_badge_class: &'static str,
     conversation: ConversationViewModel,
+    conversation_items: Vec<String>,
     action_summaries: Vec<SuggestedActionSummaryViewModel>,
     inserted_contexts: Vec<InsertedContextViewModel>,
     on_use_starter: EventHandler<String>,
@@ -29,6 +30,29 @@ pub fn ConversationPane(
                     span { class: auth_gate_badge_class, "{auth_gate_badge_text}" }
                     span { class: role_badge_class, "{role_badge_text}" }
                     span { class: "badge", "{session_line}" }
+                }
+            }
+
+            section { class: "card conversation-pane__history",
+                div { class: "card__topline",
+                    h3 { "Conversation History" }
+                    p { class: "muted", "Local runtime only (no backend persistence)." }
+                }
+                if conversation_items.is_empty() {
+                    p { class: "muted", "No messages yet. Use a starter prompt to begin." }
+                } else {
+                    div { class: "queue",
+                        for (idx, item) in conversation_items.iter().enumerate() {
+                            article { class: "queue__item",
+                                div { class: "queue__meta",
+                                    span { class: "badge", "User #{idx + 1}" }
+                                }
+                                div { class: "queue__body",
+                                    p { "{item}" }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
