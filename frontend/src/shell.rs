@@ -225,6 +225,7 @@ impl WorkspaceState {
     pub fn toggle_panel_collapsed(mut self) -> Self {
         self.right_panel.mode = match self.right_panel.mode {
             PanelMode::Collapsed => PanelMode::Expanded,
+            PanelMode::Pinned => PanelMode::Pinned,
             _ => PanelMode::Collapsed,
         };
         self
@@ -680,7 +681,7 @@ pub fn build_action_queue(_state: &ShellState) -> Vec<ShellAction> {
                 summary: "对外导出前应回看日志和权限，避免越权披露。".to_string(),
                 cta: "Open Logs".to_string(),
                 risk: ActionRisk::Guarded,
-                intent: ActionIntent::OpenExports,
+                intent: ActionIntent::OpenLogs,
             },
         ],
         Tab::Logs => vec![
@@ -712,7 +713,7 @@ pub fn build_action_queue(_state: &ShellState) -> Vec<ShellAction> {
 pub fn risk_label(risk: ActionRisk) -> &'static str {
     match risk {
         ActionRisk::Auto => "Auto",
-        ActionRisk::ReviewRequired => "Review",
+        ActionRisk::ReviewRequired => "Review Required",
         ActionRisk::Guarded => "Guarded",
     }
 }
@@ -801,6 +802,11 @@ mod tests {
     }
 
     #[test]
+    fn risk_label_returns_review_required_clarity() {
+        assert_eq!(risk_label(ActionRisk::ReviewRequired), "Review Required");
+    }
+
+    #[test]
     fn operator_panel_for_verified_case_owner_surfaces_identity_and_scope() {
         let panel = build_operator_panel(
             &state(true, true, Some("owner"), Tab::Brief),
@@ -869,6 +875,15 @@ mod tests {
 
         assert!(state.selected_object.is_some());
         assert!(state.inserted_contexts.is_empty());
+    }
+
+    #[test]
+    fn pinned_panel_mode_survives_toggle() {
+        let state = WorkspaceState::new()
+            .with_right_panel(RightPanelTab::Plan, PanelMode::Pinned)
+            .toggle_panel_collapsed();
+
+        assert_eq!(state.right_panel.mode, PanelMode::Pinned);
     }
 
     #[test]
