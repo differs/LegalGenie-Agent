@@ -36,9 +36,11 @@ pub fn ConversationPane(
                     h3 { "Quick Entry" }
                     p { class: "muted", "{conversation.stage_label}" }
                 }
-                div { class: "actions",
+                div { class: "quick-entry-grid",
                     for entry in conversation.quick_entries {
-                        button { class: "btn btn--ghost", "{entry.label}" }
+                        article { class: "quick-entry-card",
+                            strong { "{entry.label}" }
+                        }
                     }
                 }
             }
@@ -56,6 +58,7 @@ pub fn ConversationPane(
                             }
                             div { class: "queue__body",
                                 strong { "{item.title}" }
+                                p { class: "muted", "{item.summary}" }
                             }
                         }
                     }

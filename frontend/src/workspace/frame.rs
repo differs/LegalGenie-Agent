@@ -79,11 +79,9 @@ pub fn WorkspaceFrame(
         status: _,
     } = bindings;
 
-    let conversation_stage = if shell_state.has_case {
-        ConversationStage::Active
-    } else {
-        ConversationStage::Empty
-    };
+    // Task 3 has no persisted message/history state yet, so treat the composer
+    // as empty by default instead of inferring from case selection.
+    let conversation_stage = ConversationStage::Empty;
     let conversation_vm = conversation_view_model(conversation_stage);
 
     let history_scope = if shell_state.active_tab == Tab::Cases {

@@ -1406,6 +1406,18 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
   align-content:start;
 }
 .conversation-pane__header{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;}
+.quick-entry-grid{
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0, 1fr));
+  gap:10px;
+}
+.quick-entry-card{
+  border:1px solid var(--line);
+  border-radius:12px;
+  padding:12px;
+  background:rgba(255,255,255,0.78);
+  text-align:center;
+}
 .context-block{
   border:1px solid var(--line);
   border-radius:12px;
@@ -1431,6 +1443,7 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
 
 @media (max-width: 1100px){
   .workspace-shell{grid-template-columns:1fr;}
+  .quick-entry-grid{grid-template-columns:repeat(2, minmax(0, 1fr));}
   .shell{grid-template-columns:1fr;}
   .shell__sidebar{
     position:static;

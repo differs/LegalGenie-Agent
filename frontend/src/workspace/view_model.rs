@@ -11,6 +11,7 @@ pub struct QuickEntryCardViewModel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuggestedActionSummaryViewModel {
     pub title: String,
+    pub summary: String,
     pub badge_text: &'static str,
     pub badge_class: &'static str,
 }
@@ -162,6 +163,7 @@ pub fn suggested_action_summaries(actions: &[ShellAction]) -> Vec<SuggestedActio
         .iter()
         .map(|action| SuggestedActionSummaryViewModel {
             title: action.title.clone(),
+            summary: action.summary.clone(),
             badge_text: match action.risk {
                 ActionRisk::Auto => "Auto",
                 ActionRisk::ReviewRequired => "ReviewRequired",
@@ -288,6 +290,7 @@ mod tests {
         assert_eq!(vm[0].badge_text, "Auto");
         assert_eq!(vm[1].badge_text, "ReviewRequired");
         assert_eq!(vm[2].badge_text, "Guarded");
+        assert_eq!(vm[0].summary, "S");
     }
 
     #[test]
