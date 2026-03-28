@@ -175,6 +175,7 @@ pub struct WorkspaceState {
     pub has_case: bool,
     pub conversation_stage: ConversationStage,
     pub canvas: Option<CanvasKind>,
+    pub history_scope: HistoryScope,
     pub right_panel: RightPanelState,
     pub selected_object: Option<SelectedObject>,
     pub inserted_contexts: Vec<InsertedContext>,
@@ -187,6 +188,7 @@ impl WorkspaceState {
             has_case: false,
             conversation_stage: ConversationStage::Empty,
             canvas: None,
+            history_scope: HistoryScope::CurrentCase,
             right_panel: RightPanelState::default(),
             selected_object: None,
             inserted_contexts: Vec::new(),
@@ -196,6 +198,11 @@ impl WorkspaceState {
 
     pub fn with_case(mut self, has_case: bool) -> Self {
         self.has_case = has_case;
+        self
+    }
+
+    pub fn with_history_scope(mut self, scope: HistoryScope) -> Self {
+        self.history_scope = scope;
         self
     }
 
@@ -873,5 +880,16 @@ mod tests {
 
         assert_eq!(state.actions[0].risk, ActionRisk::ReviewRequired);
         assert_eq!(state.actions[1].risk, ActionRisk::Guarded);
+    }
+
+    #[test]
+    fn workspace_state_tracks_history_scope_variants() {
+        let state = WorkspaceState::new()
+            .with_history_scope(HistoryScope::AllConversations);
+
+        assert_eq!(state.history_scope, HistoryScope::AllConversations);
+
+        let state = state.with_history_scope(HistoryScope::CurrentCase);
+        assert_eq!(state.history_scope, HistoryScope::CurrentCase);
     }
 }
