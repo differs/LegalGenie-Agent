@@ -131,6 +131,10 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - `translation_error`
 - `char_count`
 - `token_estimate`
+- `source_text_hash`
+- `retry_count`
+- `last_attempt_at`
+- `next_retry_at`
 - `anchor_json`
 - `created_at`
 - `updated_at`
@@ -141,6 +145,8 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - `page_number` 用于 PDF 真实页码
 - `segment_number` 用于非 PDF 逻辑段分页
 - `chunk_kind` 标识分片来源，如 `pdf_page`、`doc_block`、`sheet_block`、`transcript_segment`
+- `source_text_hash` 用于翻译幂等与结果复用
+- `retry_count / last_attempt_at / next_retry_at` 用于后台重试调度
 - `anchor_json` 存页内偏移、标题层级、sheet 名、时间戳等文件类型相关锚点
 
 建议约束与索引：
@@ -251,6 +257,12 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - `start_offset`
 - `end_offset`
 
+偏移语义约定：
+
+- `start_offset / end_offset` 均表示相对 `source_text` 的字符偏移
+- 前端高亮以 `source_text` 为准
+- 中文阅读视图的高亮以 chunk 级命中联动为主，V1 不要求原文和译文逐字符对齐
+
 ## 翻译执行策略
 
 ### 执行方式
@@ -276,6 +288,11 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 
 测试环境优先走云端模型；私有化交付时可将 `base_url` 切换到本地部署模型服务。
 
+V1 约束：
+
+- `target_language` 在 V1 固定为 `zh-CN`
+- 字段保留为后续多目标语言扩展能力，但本轮不做多目标语言翻译
+
 ### 提示词语义
 
 翻译不是摘要。模型任务定义为：
@@ -284,6 +301,7 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - 如原文不是中文，则翻译为准确法律中文
 - 尽量保留专有名词、人名、地名、机构名、法条名的可追溯性
 - 不允许擅自总结、删减、合并或改变证据事实
+- 原文已是中文时，允许输出规范中文；V1 不提供关闭该行为的前端开关
 
 ### 失败与重试
 
@@ -314,6 +332,13 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - 初版由翻译模型返回或推断
 - 文件级 `source_language` 取主要语言汇总值，不要求覆盖所有混合语言片段
 
+### 分片上限单位与优先级
+
+- V1 的 `chunk_size_limit` 单位定义为“字符数”
+- 解析分片规则中的 `1500 - 3000` 字符目标，必须服从 `chunk_size_limit`
+- `token_estimate` 仅用于观测与后续优化，不作为 V1 的硬切分单位
+- 如 provider 运行时返回明确的上下文超限错误，翻译 worker 可对超限 chunk 做一次更细粒度二次切分，但不改变解析阶段的主分片规则
+
 ## 搜索设计
 
 搜索不再只依赖 `evidence_files.parsed_text`，而应基于 chunk 建索引，并支持三种语言模式：
@@ -342,6 +367,12 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
   - `search_evidence_chunks_translated`
 - 现有基于 `evidence_files.parsed_text` 的搜索索引短期保留，只用于旧文件兼容回退
 
+V1 搜索实现前提：
+
+- 继续沿用 SQLite FTS
+- chunk 入库或 chunk 翻译完成时增量更新对应 FTS 索引
+- 旧索引并存，直到文件完成重解析并具备 chunk 索引后再切换查询优先级
+
 ### 旧文件回退策略
 
 老文件如尚未重解析、没有 chunk 或没有译文，默认 `zh` 搜索行为为：
@@ -358,7 +389,13 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 
 ## AI 抽取设计
 
-时间线抽取、人物抽取、证据整理、摘要生成等后续 AI 能力，默认不再直接吃整份全文，而是基于 chunk 聚合执行。
+时间线抽取、人物抽取、证据整理、摘要生成等后续 AI 能力，长期目标是不再直接吃整份全文，而是基于 chunk 聚合执行。
+
+本轮范围边界：
+
+- 本轮必须把 `source_text + translated_text` 的数据与接口准备好
+- 本轮不要求同步重写所有现有 AI 抽取链路
+- 现有 AI 抽取功能可以继续沿用旧链路，但新数据模型和接口必须为后续切换做好准备
 
 默认策略：
 
