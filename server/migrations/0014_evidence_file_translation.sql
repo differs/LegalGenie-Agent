@@ -12,10 +12,17 @@ ALTER TABLE evidence_files ADD COLUMN translation_provider TEXT;
 -- Chunk-level translation source of truth.
 CREATE TABLE IF NOT EXISTS evidence_file_chunks (
     id                  TEXT PRIMARY KEY,
-    evidence_file_id    TEXT NOT NULL REFERENCES evidence_files(id) ON DELETE CASCADE,
+    evidence_id         TEXT NOT NULL REFERENCES evidence_files(id) ON DELETE CASCADE,
+    case_id             TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
     chunk_index         INTEGER NOT NULL,
+    page_number         INTEGER NOT NULL DEFAULT 0,
+    segment_number      INTEGER NOT NULL DEFAULT 0,
+    chunk_kind          TEXT NOT NULL DEFAULT 'text',
     display_label       TEXT NOT NULL,
     source_text         TEXT NOT NULL,
+    char_count          INTEGER NOT NULL DEFAULT 0,
+    token_estimate      INTEGER NOT NULL DEFAULT 0,
+    anchor_json         TEXT,
     source_text_hash    TEXT NOT NULL,
     source_language     TEXT,
     target_language     TEXT,
@@ -23,7 +30,7 @@ CREATE TABLE IF NOT EXISTS evidence_file_chunks (
     translation_status  TEXT NOT NULL DEFAULT 'pending',
     retry_count         INTEGER NOT NULL DEFAULT 0,
     max_retries         INTEGER NOT NULL DEFAULT 3,
-    last_retry_at       DATETIME,
+    last_attempt_at     DATETIME,
     next_retry_at       DATETIME,
     translation_error   TEXT,
     translated_at       DATETIME,
@@ -32,7 +39,9 @@ CREATE TABLE IF NOT EXISTS evidence_file_chunks (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_file_chunks_file_chunk
-    ON evidence_file_chunks(evidence_file_id, chunk_index);
+    ON evidence_file_chunks(evidence_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_evidence_file_chunks_case
+    ON evidence_file_chunks(case_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_file_chunks_status
     ON evidence_file_chunks(translation_status);
 CREATE INDEX IF NOT EXISTS idx_evidence_file_chunks_hash
@@ -50,5 +59,5 @@ WHERE
     AND NOT EXISTS (
         SELECT 1
         FROM evidence_file_chunks c
-        WHERE c.evidence_file_id = evidence_files.id
+        WHERE c.evidence_id = evidence_files.id
     );
