@@ -14,6 +14,10 @@
 
 ### Backend schema and config
 
+- Modify: `Cargo.toml`
+  - 如 workspace 未声明，新增 `async-trait`
+- Modify: `server/Cargo.toml`
+  - 引入 `async-trait`
 - Create: `server/migrations/0014_evidence_file_translation.sql`
 - 为 `evidence_files` 增加翻译状态字段
   - 新建 `evidence_file_chunks`
@@ -85,6 +89,7 @@
 - Modify: `server/src/config.rs`
 - Modify: `server/src/state.rs`
 - Modify: `server/src/lib.rs`
+- Modify: `server/src/main.rs`
 - Create: `server/tests/test_support/mod.rs`
 - Test: `server/tests/translation_smoke.rs`
 
@@ -173,7 +178,7 @@ Expected: PASS
 - [ ] **Step 5: 提交**
 
 ```bash
-git add server/migrations/0014_evidence_file_translation.sql server/src/config.rs server/src/state.rs server/src/lib.rs server/tests/test_support/mod.rs server/tests/translation_smoke.rs
+git add Cargo.toml server/Cargo.toml server/migrations/0014_evidence_file_translation.sql server/src/config.rs server/src/state.rs server/src/lib.rs server/src/main.rs server/tests/test_support/mod.rs server/tests/translation_smoke.rs
 git commit -m "feat: add bilingual evidence schema"
 ```
 
@@ -332,6 +337,7 @@ Expected: FAIL，`translation_status` 不推进或接口不存在。
 - [ ] **Step 3: 写最小翻译 provider 抽象和 fake provider**
 
 ```rust
+#[async_trait::async_trait]
 pub trait TranslationProvider: Send + Sync {
     async fn translate(&self, source_text: &str, target_language: &str) -> anyhow::Result<TranslationResult>;
 }
@@ -357,6 +363,11 @@ pub async fn enqueue_translation(
 - `build_test_app_with_fake_translation()` 基于现有 `build_test_app()` 复制一份 builder
 - 在 `AppState` 中注入 `Arc<FakeTranslationProvider>`
 - fake provider 返回稳定中译文，避免测试依赖外网模型
+
+解析链集成点也必须明确：
+
+- 将 `parser::enqueue_parse(pool, config, file_id, force)` 改为接受 `AppState` 或至少接受 `Arc<dyn TranslationProvider>`
+- `parse_and_update` 在 chunks 持久化完成后，直接调用 `translation::enqueue_translation(...)`
 
 真实 provider 协议固定为 OpenAI-compatible HTTP：
 
@@ -396,6 +407,8 @@ pub async fn enqueue_translation(
 - 每次 chunk 翻译完成时记录 `evidence_file_chunks.source_language`
 - 文件级 `source_language` 取该文件所有 chunk 的主语言汇总值
 - app 启动时创建一个 translation retry poller：
+  - 只在 `server/src/main.rs` 中，在 `let state = AppState::new(...)` 之后调用一次 `translation::start_retry_poller_once(state.clone())`
+  - 通过 `AtomicBool` / `OnceCell` 保证整个进程只启动一个 poller
   - `tokio::spawn`
   - 每 `30s` 扫描一次 `next_retry_at <= now()` 且 `translation_status = 'pending' | 'failed'`
   - 重新入队 chunk 翻译任务
@@ -529,7 +542,7 @@ async fn global_search_accepts_language_mode_for_evidence_hits() {
     let resp = request_json(
         &app,
         Method::GET,
-        "/api/v1/search?q=Payment&language_mode=bilingual",
+        "/api/v1/search?keyword=Payment&language_mode=bilingual",
         Some(&token),
         json!({})
     )
@@ -602,6 +615,7 @@ Expected: PASS，包含旧文件回退和 `translation_incomplete` 分支。
 - 新文件 `language_mode=zh` 且翻译未覆盖全部 chunk 时，只查中文 FTS，不查原文 FTS
 - 此时返回 `translation_incomplete=true`
 - 同时返回 `source_fallback=false`
+- `match_start_offset` / `match_end_offset` 由 Rust 侧在拿到 FTS 命中 chunk 后，根据 `matched_language` 在对应全文中做首个命中词的字符偏移定位，不依赖 SQLite 直接给 offset
 
 - [ ] **Step 5: 提交**
 
