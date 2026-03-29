@@ -18,8 +18,7 @@
 - 为 `evidence_files` 增加翻译状态字段
   - 新建 `evidence_file_chunks`
 - Create: `server/migrations/0015_search_evidence_chunks.sql`
-  - 新建 chunk 级 FTS 表和触发器
-  - Task 1 先建文件；Task 5 再填完整 FTS 内容
+  - 在 Task 5 一次性新增 chunk 级 FTS 表和触发器
 - Modify: `server/src/config.rs`
   - 新增翻译 provider 配置
 - Modify: `server/src/state.rs`
@@ -79,7 +78,6 @@
 
 **Files:**
 - Create: `server/migrations/0014_evidence_file_translation.sql`
-- Create: `server/migrations/0015_search_evidence_chunks.sql`
 - Modify: `server/src/config.rs`
 - Modify: `server/src/state.rs`
 - Modify: `server/src/lib.rs`
@@ -170,7 +168,7 @@ Expected: PASS
 - [ ] **Step 5: 提交**
 
 ```bash
-git add server/migrations/0014_evidence_file_translation.sql server/migrations/0015_search_evidence_chunks.sql server/src/config.rs server/src/lib.rs server/tests/translation_smoke.rs
+git add server/migrations/0014_evidence_file_translation.sql server/src/config.rs server/src/state.rs server/src/lib.rs server/tests/translation_smoke.rs
 git commit -m "feat: add bilingual evidence schema"
 ```
 
@@ -511,6 +509,26 @@ async fn evidence_search_supports_zh_source_and_bilingual_modes() {
     assert!(zh["data"]["items"][0]["file_name"].as_str().unwrap().contains("en.txt"));
     assert!(source["data"]["items"][0]["anchor_json"].is_object());
     assert!(bilingual["data"]["items"][0]["snippet_source"].is_string());
+}
+
+#[tokio::test]
+async fn global_search_accepts_language_mode_for_evidence_hits() {
+    let (app, _tmp) = build_test_app_with_fake_translation().await;
+    let register = register_user(&app, "globalsearch", "globalsearch@example.com").await;
+    let token = register.access_token;
+    let case_id = create_case(&app, &token, "Global Search Case").await;
+    let _file_id = upload_text_file(&app, &token, &case_id, "en.txt", "Payment due tomorrow.").await;
+
+    let resp = request_json(
+        &app,
+        Method::GET,
+        "/api/v1/search?q=Payment&language_mode=bilingual",
+        Some(&token),
+        json!({})
+    )
+    .await;
+
+    assert_eq!(resp.0, StatusCode::OK);
 }
 ```
 
