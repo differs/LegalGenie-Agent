@@ -19,6 +19,7 @@
   - 新建 `evidence_file_chunks`
 - Create: `server/migrations/0015_search_evidence_chunks.sql`
   - 新建 chunk 级 FTS 表和触发器
+  - Task 1 先建文件；Task 5 再填完整 FTS 内容
 - Modify: `server/src/config.rs`
   - 新增翻译 provider 配置
 - Modify: `server/src/state.rs`
@@ -363,6 +364,19 @@ pub async fn enqueue_translation(
   - `messages = [{role: \"system\"}, {role: \"user\"}]`
 - 响应从首个 choice 提取译文文本
 
+提示词固定为：
+
+- `system`：
+  - 你是法律证据翻译引擎
+  - 任务是翻译或规范化，不是摘要
+  - 不得删减、压缩、改写证据事实
+  - 保留人名、地名、机构名、法条名和专有名词可追溯性
+  - 如果原文已是中文，则输出规范中文
+- `user`：
+  - 提供 `source_text`
+  - 指明目标语言 `zh-CN`
+  - 要求只返回译文正文
+
 - [ ] **Step 4: 实现幂等、重试、并发限制、审计和文件级状态聚合**
 
 必须明确落地：
@@ -374,6 +388,8 @@ pub async fn enqueue_translation(
 - 已成功且幂等键不变的 chunk 不重写
 - provider 调用日志只记录元数据，不记录 chunk 全文
 - 文件级聚合同步回写 `translated_chunk_count` 和 `failed_chunk_count`
+- 每次 chunk 翻译完成时记录 `evidence_file_chunks.source_language`
+- 文件级 `source_language` 取该文件所有 chunk 的主语言汇总值
 - app 启动时创建一个 translation retry poller：
   - `tokio::spawn`
   - 每 `30s` 扫描一次 `next_retry_at <= now()` 且 `translation_status = 'pending' | 'failed'`
@@ -620,6 +636,12 @@ pub async fn post_retry_translation(...) -> Result<serde_json::Value, String> { 
 - 老文件无 chunk 时，显示降级提示并退回整份原文阅读
 - `translation_incomplete=true` 时，显示“中文索引构建中，可切到原文或双语搜索”
 - 搜索页新增 `language_mode = zh | source | bilingual` 切换，并识别 `source_fallback` 标记
+
+- [ ] **Step 5: 明确 search 页面语言切换测试并提交前端文件**
+
+Run: `cargo test -p legalminds-frontend search_language_mode_toggle_updates_request -- --exact`
+
+Expected: PASS
 
 Run: `cargo test -p legalminds-frontend`
 
