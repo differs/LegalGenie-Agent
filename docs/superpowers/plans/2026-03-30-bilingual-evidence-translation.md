@@ -637,7 +637,7 @@ pub async fn post_retry_translation(...) -> Result<serde_json::Value, String> { 
 - `translation_incomplete=true` 时，显示“中文索引构建中，可切到原文或双语搜索”
 - 搜索页新增 `language_mode = zh | source | bilingual` 切换，并识别 `source_fallback` 标记
 
-- [ ] **Step 5: 明确 search 页面语言切换测试并提交前端文件**
+- [ ] **Step 5: 明确 search 页面语言切换测试**
 
 Run: `cargo test -p legalminds-frontend search_language_mode_toggle_updates_request -- --exact`
 
@@ -647,10 +647,10 @@ Run: `cargo test -p legalminds-frontend`
 
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
-git add frontend/src/models.rs frontend/src/api.rs frontend/src/pages/files.rs
+git add frontend/src/models.rs frontend/src/api.rs frontend/src/pages/files.rs frontend/src/pages/search.rs
 git commit -m "feat: add bilingual evidence reader UI"
 ```
 
