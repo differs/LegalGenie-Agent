@@ -229,8 +229,6 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 
 - `locator_type`
 - `display_label`
-- `start_offset`
-- `end_offset`
 
 按文件类型补充：
 
@@ -254,14 +252,20 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - `chunk_index`
 - `page_number` 或 `segment_number`
 - `display_label`
-- `start_offset`
-- `end_offset`
 
-偏移语义约定：
+`display_label` 来源约定：
 
-- `start_offset / end_offset` 均表示相对 `source_text` 的字符偏移
-- 前端高亮以 `source_text` 为准
-- 中文阅读视图的高亮以 chunk 级命中联动为主，V1 不要求原文和译文逐字符对齐
+- `display_label` 作为稳定展示字段持久化保存
+- PDF 形如 `第 12 页`
+- 非 PDF 形如 `第 8 段`、`Sheet A / A1:D20`、`00:03:20 - 00:04:10`
+
+命中偏移语义约定：
+
+- `start_offset / end_offset` 不属于稳定的 chunk 锚点字段
+- 它们只属于“搜索命中结果”的动态返回值
+- 偏移均表示相对当前命中语言文本的字符偏移
+- 前端高亮以搜索结果返回的命中偏移为准
+- 中文阅读视图的高亮以命中 chunk 联动为主，V1 不要求原文和译文逐字符对齐
 
 ## 翻译执行策略
 
@@ -315,9 +319,16 @@ V1 约束：
 - 自动重试上限：`3` 次
 - 退避策略：指数退避，建议 `1m / 5m / 30m`
 - 超过自动重试上限后，chunk 进入终态 `failed`
-- 手动重试会重置该 chunk 的自动重试计数
+- 手动重试只对 `failed`、`pending`、`processing` 或 `selected` 的未完成 chunk 生效
+- 已 `done` 且幂等键不变的 chunk，不会因手动重试被覆盖
 - 幂等键：`(evidence_id, chunk_index, translation_provider, translation_model, source_text_hash)`
 - 如同一幂等键已成功写入，不得重复落库覆盖
+
+`POST /translate/retry` 的 `scope` 语义：
+
+- `failed`：只重试失败 chunk
+- `all`：重试所有未完成 chunk，并对失败 chunk 重新入队；已成功且幂等键不变的 chunk 直接跳过，不覆盖既有结果
+- `selected`：只处理指定 chunk；若指定 chunk 已成功且幂等键不变，则返回 `skipped`
 
 文件级 `translation_status` 聚合规则：
 
@@ -356,6 +367,7 @@ V1 约束：
 - 命中文本摘要
 - 命中来源语言
 - chunk 锚点
+- 动态命中偏移
 
 这样前端可以直接跳转到对应 chunk 并高亮。
 
@@ -386,6 +398,15 @@ V1 搜索实现前提：
 - 新文件走 chunk 搜索真源
 - 老文件在完成重解析前允许临时回退
 - 一旦文件生成 chunk 数据，搜索优先级切换到 chunk 索引，不再优先依赖 `parsed_text`
+
+### 翻译未完成时的 `zh` 搜索行为
+
+对于新文件，如果解析已完成但翻译仍处于 `processing` 或 `partial`：
+
+- `zh` 搜索只搜索当前已生成的中文 chunk
+- 不自动回退到原文，避免把“中文搜索” silently 变成原文搜索
+- 如果文件中文翻译尚未覆盖全部 chunk，接口应返回 `translation_incomplete=true`
+- 前端据此提示：“中文索引构建中，当前结果可能不完整，可切到原文或双语搜索”
 
 ## AI 抽取设计
 
@@ -492,8 +513,8 @@ V1 搜索实现前提：
     - `chunk_ids`，仅当 `scope = selected` 时必填
   - 行为：
     - `failed`：只重试失败 chunk
-    - `all`：重试整份文件全部 chunk
-    - `selected`：只重试给定 chunk
+    - `all`：重试所有未完成 chunk，已成功且幂等键不变的 chunk 直接跳过
+    - `selected`：只重试给定 chunk；已成功且幂等键不变时返回 `skipped`
 - `GET /api/v1/files/:id/translation`
   - 返回：
     - `translation_status`
@@ -528,6 +549,26 @@ V1 搜索实现前提：
 - `403`：无权限访问
 - `409`：文件尚未完成解析，chunks 不可读
 - `422`：请求参数非法，例如 `scope=selected` 但未提供 `chunk_ids`
+
+搜索结果响应最小契约：
+
+- `file_id`
+- `file_name`
+- `chunk_id`
+- `chunk_index`
+- `display_label`
+- `language_mode`
+- `matched_language`
+- `snippet_source`
+- `snippet_translated`
+- `match_start_offset`
+- `match_end_offset`
+- `anchor_json`
+
+其中：
+
+- `snippet_source` 与 `snippet_translated` 允许二选一为空
+- `language_mode=bilingual` 时，优先返回命中语言对应的 snippet，并尽量同时附带另一侧 snippet 供双语预览
 
 ## 数据迁移与兼容策略
 
