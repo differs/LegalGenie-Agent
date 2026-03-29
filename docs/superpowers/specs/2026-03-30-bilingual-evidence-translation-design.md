@@ -137,10 +137,21 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 
 字段语义：
 
+- `evidence_id` 明确外键指向 `evidence_files.id`，与现有 `/api/v1/files/:id` 中的 `:id` 是同一个文件实体 ID，不引入新的“证据主表”概念
 - `page_number` 用于 PDF 真实页码
 - `segment_number` 用于非 PDF 逻辑段分页
 - `chunk_kind` 标识分片来源，如 `pdf_page`、`doc_block`、`sheet_block`、`transcript_segment`
 - `anchor_json` 存页内偏移、标题层级、sheet 名、时间戳等文件类型相关锚点
+
+建议约束与索引：
+
+- 外键：`evidence_file_chunks.evidence_id -> evidence_files.id`
+- 唯一约束：`(evidence_id, chunk_index)`
+- 常用索引：
+  - `(case_id, evidence_id, chunk_index)`
+  - `(evidence_id, page_number)`
+  - `(evidence_id, segment_number)`
+  - `(evidence_id, translation_status)`
 
 ## 状态机
 
@@ -204,6 +215,42 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - 初版建议原文字符数目标 `1500 - 3000`
 - 超长 chunk 可继续细切，超短相邻块可合并
 
+### `anchor_json` 最小 schema
+
+`anchor_json` 不是自由结构，至少要满足前端跳转、高亮和引用回溯的最小需求。
+
+通用最小字段：
+
+- `locator_type`
+- `display_label`
+- `start_offset`
+- `end_offset`
+
+按文件类型补充：
+
+- `PDF`
+  - `locator_type = "pdf_page"`
+  - 必需：`page_number`
+  - 可选：`bbox_list`、`line_range`
+- `DOCX / TXT / OCR 长文`
+  - `locator_type = "text_block"`
+  - 必需：`segment_number`
+  - 可选：`heading_path`、`paragraph_range`
+- `XLSX`
+  - `locator_type = "sheet_block"`
+  - 必需：`sheet_name`、`cell_range`
+- `音频转写`
+  - `locator_type = "transcript_segment"`
+  - 必需：`start_ms`、`end_ms`
+
+前端搜索命中跳转和阅读高亮，最低依赖以下字段：
+
+- `chunk_index`
+- `page_number` 或 `segment_number`
+- `display_label`
+- `start_offset`
+- `end_offset`
+
 ## 翻译执行策略
 
 ### 执行方式
@@ -245,6 +292,28 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - 文件可进入 `translation=partial`
 - 双语阅读区对失败 chunk 保留原文，并显示“翻译失败，可重试”
 
+重试与幂等规则：
+
+- 自动重试上限：`3` 次
+- 退避策略：指数退避，建议 `1m / 5m / 30m`
+- 超过自动重试上限后，chunk 进入终态 `failed`
+- 手动重试会重置该 chunk 的自动重试计数
+- 幂等键：`(evidence_id, chunk_index, translation_provider, translation_model, source_text_hash)`
+- 如同一幂等键已成功写入，不得重复落库覆盖
+
+文件级 `translation_status` 聚合规则：
+
+- 只要存在 `pending` 或 `processing` chunk，文件级状态为 `processing`
+- 所有 chunk 为 `done`，文件级状态为 `done`
+- 所有 chunk 都进入终态且 `done = 0`，文件级状态为 `failed`
+- 所有 chunk 都进入终态且 `done > 0` 且存在失败 chunk，文件级状态为 `partial`
+
+`source_language` 来源规则：
+
+- 以 chunk 为粒度记录
+- 初版由翻译模型返回或推断
+- 文件级 `source_language` 取主要语言汇总值，不要求覆盖所有混合语言片段
+
 ## 搜索设计
 
 搜索不再只依赖 `evidence_files.parsed_text`，而应基于 chunk 建索引，并支持三种语言模式：
@@ -264,6 +333,28 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - chunk 锚点
 
 这样前端可以直接跳转到对应 chunk 并高亮。
+
+### 索引与迁移切换策略
+
+- 新解析文件：一律以 chunk 为真源建立搜索索引
+- 建议新增两套 chunk 级 FTS：
+  - `search_evidence_chunks_source`
+  - `search_evidence_chunks_translated`
+- 现有基于 `evidence_files.parsed_text` 的搜索索引短期保留，只用于旧文件兼容回退
+
+### 旧文件回退策略
+
+老文件如尚未重解析、没有 chunk 或没有译文，默认 `zh` 搜索行为为：
+
+- 优先命中 chunk 中文索引
+- 若文件没有 chunk 中文索引，则退回旧 `parsed_text` 原文索引
+- 回退结果必须打上 `原文回退` 标记，避免用户误以为这是中文结果
+
+这意味着：
+
+- 新文件走 chunk 搜索真源
+- 老文件在完成重解析前允许临时回退
+- 一旦文件生成 chunk 数据，搜索优先级切换到 chunk 索引，不再优先依赖 `parsed_text`
 
 ## AI 抽取设计
 
@@ -339,11 +430,42 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 
 - `GET /api/v1/files/:id/chunks`
   - 读取文件 chunks
-  - 支持分页参数与视图模式参数
+  - 查询参数：
+    - `page`
+    - `page_size`
+    - `view_mode = bilingual | zh | source`
+  - 排序：固定按 `chunk_index ASC`
+  - 响应项最少包含：
+    - `id`
+    - `chunk_index`
+    - `page_number`
+    - `segment_number`
+    - `chunk_kind`
+    - `display_label`
+    - `source_text`
+    - `translated_text`
+    - `translation_status`
+    - `translation_error`
+    - `anchor_json`
 - `POST /api/v1/files/:id/translate/retry`
-  - 重试失败 chunk 或整份文件翻译
+  - 请求体：
+    - `scope = failed | all | selected`
+    - `chunk_ids`，仅当 `scope = selected` 时必填
+  - 行为：
+    - `failed`：只重试失败 chunk
+    - `all`：重试整份文件全部 chunk
+    - `selected`：只重试给定 chunk
 - `GET /api/v1/files/:id/translation`
-  - 读取文件级翻译概览与进度
+  - 返回：
+    - `translation_status`
+    - `translation_error`
+    - `chunk_count`
+    - `translated_chunk_count`
+    - `failed_chunk_count`
+    - `source_language`
+    - `target_language`
+    - `translation_provider`
+    - `translation_model`
 
 ### 搜索扩展
 
@@ -354,6 +476,19 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - `bilingual`
 
 默认值：`zh`
+
+前后端枚举对齐规则：
+
+- 阅读视图使用 `view_mode = bilingual | zh | source`
+- 搜索模式使用 `language_mode = bilingual | zh | source`
+- 两者枚举值保持一致，避免前端做多套映射
+
+建议错误码范围：
+
+- `404`：文件不存在
+- `403`：无权限访问
+- `409`：文件尚未完成解析，chunks 不可读
+- `422`：请求参数非法，例如 `scope=selected` 但未提供 `chunk_ids`
 
 ## 数据迁移与兼容策略
 
@@ -367,6 +502,7 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 - 老文件即使没有 chunk 数据，也不应导致系统不可用
 - 重新解析文件时，应自动生成新的 chunk 真源
 - `parsed_text` 和原解析 artifact 继续保留，用于旧接口兼容与全文导出
+- 老文件无 chunk 时，文件阅读区应退回“整份原文阅读”降级态，并明确提示“该文件尚未完成双语分片，请重新解析以启用双语对照与精准定位”
 
 本轮不要求强制对全部历史文件做一次全量重建。
 
@@ -420,6 +556,28 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 
 翻译 prompt 和结果校验需要明确约束“翻译/规范化，不得擅自总结证据事实”。
 
+### 风险 5：翻译调用的日志与审计可能泄露敏感文本
+
+实现时必须避免把 chunk 原文、译文和完整模型请求体直接打进常规日志。
+
+最小约束：
+
+- 操作日志只记录文件级与任务级元数据，不记录 chunk 全文
+- provider 调用审计只记录：
+  - `evidence_id`
+  - `chunk_index`
+  - `provider`
+  - `model`
+  - `status`
+  - `latency_ms`
+  - `request_id`
+- 失败原因按类别记录，例如：
+  - `timeout`
+  - `rate_limited`
+  - `provider_error`
+  - `validation_error`
+  - `permanent_failure`
+
 ## 验收标准
 
 功能完成后，至少满足以下条件：
@@ -431,4 +589,3 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 5. AI 抽取链默认可获得原文与中文
 6. 翻译失败不会让文件不可用
 7. chunk 支持定位、引用、命中跳转和重试
-
