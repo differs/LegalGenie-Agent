@@ -1,0 +1,6 @@
+[application]
+name = "legalminds"
+sub_package = "legalminds-frontend"
+
+[web.app]
+title = "LegalMinds"

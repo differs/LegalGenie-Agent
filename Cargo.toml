@@ -4,6 +4,7 @@ members = [
   "shared",
   "frontend",
 ]
+default-members = ["frontend"]
 resolver = "2"
 
 [workspace.package]
@@ -44,6 +45,4 @@ quick-xml = "0.39"
 zip = "8.2"
 
 # Frontend (Dioxus)
-dioxus = { version = "0.5", features = ["macro"] }
-dioxus-web = "0.5"
-dioxus-desktop = "0.5"
+dioxus = { version = "=0.7.3", default-features = false, features = ["minimal"] }

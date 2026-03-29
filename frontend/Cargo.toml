@@ -3,14 +3,19 @@ name = "legalminds-frontend"
 edition.workspace = true
 version.workspace = true
 
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+
 [dependencies]
+chrono.workspace = true
 dioxus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 urlencoding.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-dioxus-web.workspace = true
 gloo-net = "0.6"
 gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "0.3"
@@ -18,6 +23,5 @@ wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "Document", "Element", "HtmlAnchorElement", "Url", "Window"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-dioxus-desktop.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
