@@ -261,6 +261,11 @@ fn chunk_anchor_pdf(page_number: i64, part: Option<(i64, i64)>) -> serde_json::V
   - 按时间段切分，`display_label` 形如 `00:03:20 - 00:04:10`
   - 必须服从 `TRANSLATION_CHUNK_SIZE_LIMIT`
 
+如当前解析器拿不到精确 anchor：
+
+- XLSX：在 `parse_excel_sync` 中按固定行窗口累计单元格，直接生成 `sheet_name + cell_range`
+- 音频：优先从转写库获取真实 segment；如果 V1 只能拿到整段 transcript，则按总时长和字符比例生成近似 `start_ms/end_ms`，并在 `anchor_json` 中标记 `synthetic=true`
+
 - [ ] **Step 5: 解析完成后重置并回写文件级翻译聚合字段**
 
 每次重解析并重建 chunks 时，必须同步重置：
@@ -349,6 +354,15 @@ pub async fn enqueue_translation(
 - 在 `AppState` 中注入 `Arc<FakeTranslationProvider>`
 - fake provider 返回稳定中译文，避免测试依赖外网模型
 
+真实 provider 协议固定为 OpenAI-compatible HTTP：
+
+- URL：`{TRANSLATION_BASE_URL}/chat/completions`
+- Header：`Authorization: Bearer {TRANSLATION_API_KEY}`
+- JSON：
+  - `model = TRANSLATION_MODEL`
+  - `messages = [{role: \"system\"}, {role: \"user\"}]`
+- 响应从首个 choice 提取译文文本
+
 - [ ] **Step 4: 实现幂等、重试、并发限制、审计和文件级状态聚合**
 
 必须明确落地：
@@ -360,6 +374,10 @@ pub async fn enqueue_translation(
 - 已成功且幂等键不变的 chunk 不重写
 - provider 调用日志只记录元数据，不记录 chunk 全文
 - 文件级聚合同步回写 `translated_chunk_count` 和 `failed_chunk_count`
+- app 启动时创建一个 translation retry poller：
+  - `tokio::spawn`
+  - 每 `30s` 扫描一次 `next_retry_at <= now()` 且 `translation_status = 'pending' | 'failed'`
+  - 重新入队 chunk 翻译任务
 
 Run: `cargo test -p legalminds-server --test translation_smoke`
 
@@ -472,9 +490,11 @@ async fn evidence_search_supports_zh_source_and_bilingual_modes() {
     let source = search_evidence(&app, &token, "Payment", "source").await;
     let bilingual = search_evidence(&app, &token, "Payment", "bilingual").await;
 
-    assert!(zh["data"]["items"].as_array().unwrap().len() >= 1);
-    assert!(source["data"]["items"].as_array().unwrap().len() >= 1);
-    assert!(bilingual["data"]["items"].as_array().unwrap().len() >= 1);
+    assert_eq!(zh["data"]["items"][0]["file_id"], file_id);
+    assert_eq!(zh["data"]["items"][0]["language_mode"], "zh");
+    assert!(zh["data"]["items"][0]["file_name"].as_str().unwrap().contains("en.txt"));
+    assert!(source["data"]["items"][0]["anchor_json"].is_object());
+    assert!(bilingual["data"]["items"][0]["snippet_source"].is_string());
 }
 ```
 
@@ -518,6 +538,8 @@ END;
 evidence 搜索返回至少新增：
 
 - `language_mode`
+- `file_id`
+- `file_name`
 - `chunk_id`
 - `chunk_index`
 - `display_label`
