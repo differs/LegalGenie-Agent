@@ -159,6 +159,14 @@ CREATE TABLE evidence_file_chunks (
 );
 ```
 
+迁移回填规则必须明确：
+
+- 对历史数据中 `parse_status='done'` 且 `parsed_text` 非空、但尚未有 chunk 的文件：
+  - `translation_status = 'failed'`
+  - `translation_error = 'reparse required for bilingual translation'`
+  - `chunk_count = 0`
+  - 前端据此展示“需重新解析以启用双语分片”
+
 - [ ] **Step 4: 增加配置项并让测试环境可构建**
 
 配置名固定为：
@@ -419,7 +427,9 @@ pub async fn enqueue_translation(
   - 每 `30s` 扫描一次 `evidence_file_chunks` 表中：
     - `next_retry_at <= now()` 且 `translation_status IN ('pending', 'failed')`
     - 或 `translation_status = 'processing'` 且 `last_attempt_at` 超过 `10m` 未更新
-  - 重新入队 chunk 翻译任务
+  - 重新入队前，先做原子 claim：
+    - `UPDATE evidence_file_chunks SET translation_status='processing', last_attempt_at=CURRENT_TIMESTAMP WHERE id=? AND translation_status IN ('pending','failed')`
+    - 仅 `rows_affected = 1` 的 worker 继续执行
   - 对超时 `processing` chunk，先原子地重置为 `pending`，再重新入队，避免并发重复执行
 
 Run: `cargo test -p legalminds-server --test translation_smoke`
