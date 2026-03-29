@@ -263,12 +263,15 @@ fn chunk_anchor_pdf(page_number: i64, part: Option<(i64, i64)>) -> serde_json::V
   - 按标题、空行段落和字符数切分
   - 使用 `第 N 段`
   - 必须服从 `TRANSLATION_CHUNK_SIZE_LIMIT`
+  - `anchor_json` 至少包含：`locator_type`, `display_label`, `segment_number`
 - XLSX：
   - 按 `sheet + block` 切分，`display_label` 形如 `Sheet A / A1:D20`
   - 必须服从 `TRANSLATION_CHUNK_SIZE_LIMIT`
+  - `anchor_json` 至少包含：`locator_type`, `display_label`, `sheet_name`, `cell_range`
 - 音频转写：
   - 按时间段切分，`display_label` 形如 `00:03:20 - 00:04:10`
   - 必须服从 `TRANSLATION_CHUNK_SIZE_LIMIT`
+  - `anchor_json` 至少包含：`locator_type`, `display_label`, `start_ms`, `end_ms`
 
 如当前解析器拿不到精确 anchor：
 
@@ -410,7 +413,7 @@ pub async fn enqueue_translation(
   - 只在 `server/src/main.rs` 中，在 `let state = AppState::new(...)` 之后调用一次 `translation::start_retry_poller_once(state.clone())`
   - 通过 `AtomicBool` / `OnceCell` 保证整个进程只启动一个 poller
   - `tokio::spawn`
-  - 每 `30s` 扫描一次 `next_retry_at <= now()` 且 `translation_status = 'pending' | 'failed'`
+  - 每 `30s` 扫描一次 `evidence_file_chunks` 表中 `next_retry_at <= now()` 且 `translation_status IN ('pending', 'failed')` 的 chunk
   - 重新入队 chunk 翻译任务
 
 Run: `cargo test -p legalminds-server --test translation_smoke`
@@ -524,11 +527,11 @@ async fn evidence_search_supports_zh_source_and_bilingual_modes() {
     let source = search_evidence(&app, &token, "Payment", "source").await;
     let bilingual = search_evidence(&app, &token, "Payment", "bilingual").await;
 
-    assert_eq!(zh["data"]["items"][0]["file_id"], file_id);
-    assert_eq!(zh["data"]["items"][0]["language_mode"], "zh");
-    assert!(zh["data"]["items"][0]["file_name"].as_str().unwrap().contains("en.txt"));
-    assert!(source["data"]["items"][0]["anchor_json"].is_object());
-    assert!(bilingual["data"]["items"][0]["snippet_source"].is_string());
+    assert_eq!(zh["data"]["results"][0]["file_id"], file_id);
+    assert_eq!(zh["data"]["results"][0]["language_mode"], "zh");
+    assert!(zh["data"]["results"][0]["file_name"].as_str().unwrap().contains("en.txt"));
+    assert!(source["data"]["results"][0]["anchor_json"].is_object());
+    assert!(bilingual["data"]["results"][0]["snippet_source"].is_string());
 }
 
 #[tokio::test]
@@ -574,7 +577,7 @@ CREATE TRIGGER evidence_chunks_au AFTER UPDATE ON evidence_file_chunks BEGIN
   VALUES('delete', old.rowid, old.source_text);
   INSERT INTO search_evidence_chunks_source(rowid, source_text) VALUES (new.rowid, new.source_text);
   INSERT INTO search_evidence_chunks_translated(search_evidence_chunks_translated, rowid, translated_text)
-  VALUES('delete', old.rowid, old.translated_text);
+  VALUES('delete', old.rowid, coalesce(old.translated_text, ''));
   INSERT INTO search_evidence_chunks_translated(rowid, translated_text)
   VALUES (new.rowid, coalesce(new.translated_text, ''));
 END;
@@ -583,13 +586,13 @@ CREATE TRIGGER evidence_chunks_ad AFTER DELETE ON evidence_file_chunks BEGIN
   INSERT INTO search_evidence_chunks_source(search_evidence_chunks_source, rowid, source_text)
   VALUES('delete', old.rowid, old.source_text);
   INSERT INTO search_evidence_chunks_translated(search_evidence_chunks_translated, rowid, translated_text)
-  VALUES('delete', old.rowid, old.translated_text);
+  VALUES('delete', old.rowid, coalesce(old.translated_text, ''));
 END;
 ```
 
 - [ ] **Step 4: 扩展 evidence 搜索响应契约，并实现 `zh` 未翻译完成语义**
 
-evidence 搜索返回至少新增：
+保留现有 `data.results` envelope，不新建 `data.items`。在现有 `SearchResult` 上仅为 evidence 命中扩展：
 
 - `language_mode`
 - `file_id`
@@ -713,8 +716,8 @@ async fn legacy_file_without_chunks_still_remains_usable() {
     let detail = request_json(&app, Method::GET, &format!("/api/v1/files/{file_id}"), Some(&token), json!({})).await;
     assert_eq!(detail.0, StatusCode::OK);
 
-    let search = request_json(&app, Method::GET, "/api/v1/search/evidence?q=Legacy&language_mode=zh", Some(&token), json!({})).await;
-    assert_eq!(search.1["data"]["items"][0]["source_fallback"], true);
+    let search = request_json(&app, Method::GET, "/api/v1/search/evidence?keyword=Legacy&language_mode=zh", Some(&token), json!({})).await;
+    assert_eq!(search.1["data"]["results"][0]["source_fallback"], true);
 }
 ```
 
