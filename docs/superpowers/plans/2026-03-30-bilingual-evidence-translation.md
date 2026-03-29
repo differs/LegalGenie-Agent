@@ -64,9 +64,13 @@
 
 ### Tests
 
+- Create: `server/tests/test_support/mod.rs`
+  - 提取 `build_test_app_with_pool`
+  - 提取 `request_json`、`request_raw`、`request_multipart_text`
+  - 提取 `register_user`、`create_case`、`upload_text_file`、`wait_for_file_parse_done`
 - Create: `server/tests/translation_smoke.rs`
   - 覆盖 chunk、自动翻译、重试与搜索行为
-  - 复用 `api_smoke.rs` / `permissions_smoke.rs` 现有 helper 风格：`build_test_app`、`request_json`、`request_raw`、`request_multipart_text`
+  - 复用 `server/tests/test_support/mod.rs`
 - Modify: `server/tests/api_smoke.rs`
   - 保持文件上传/解析主路径回归
 - Modify: `frontend/src/pages/files.rs`
@@ -81,6 +85,7 @@
 - Modify: `server/src/config.rs`
 - Modify: `server/src/state.rs`
 - Modify: `server/src/lib.rs`
+- Create: `server/tests/test_support/mod.rs`
 - Test: `server/tests/translation_smoke.rs`
 
 - [ ] **Step 1: 写失败测试，锁定新 schema 和配置会被使用**
@@ -88,11 +93,11 @@
 ```rust
 #[tokio::test]
 async fn translated_chunk_schema_is_available() {
-    let (app, _tmp) = build_test_app().await;
+    let (_app, _tmp, pool) = build_test_app_with_pool().await;
     let cols = sqlx::query_scalar::<_, String>(
         "SELECT name FROM pragma_table_info('evidence_file_chunks') ORDER BY cid"
     )
-    .fetch_all(test_pool(&app).await)
+    .fetch_all(&pool)
     .await
     .unwrap();
 
@@ -168,7 +173,7 @@ Expected: PASS
 - [ ] **Step 5: 提交**
 
 ```bash
-git add server/migrations/0014_evidence_file_translation.sql server/src/config.rs server/src/state.rs server/src/lib.rs server/tests/translation_smoke.rs
+git add server/migrations/0014_evidence_file_translation.sql server/src/config.rs server/src/state.rs server/src/lib.rs server/tests/test_support/mod.rs server/tests/translation_smoke.rs
 git commit -m "feat: add bilingual evidence schema"
 ```
 
@@ -379,6 +384,8 @@ pub async fn enqueue_translation(
 
 必须明确落地：
 
+- chunk 级状态使用：`pending -> processing -> done | failed`
+- 解析完成并成功入库 chunks 后，文件级 `translation_status` 立即置为 `processing`
 - 自动重试上限 `3`
 - 退避 `1m / 5m / 30m`
 - 幂等键：`(evidence_id, chunk_index, translation_provider, translation_model, source_text_hash)`
