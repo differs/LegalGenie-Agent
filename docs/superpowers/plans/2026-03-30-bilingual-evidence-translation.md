@@ -158,6 +158,7 @@ CREATE TABLE evidence_file_chunks (
 - `TRANSLATION_BASE_URL`
 - `TRANSLATION_API_KEY`
 - `TRANSLATION_MODEL`
+- `TRANSLATION_TARGET_LANGUAGE`
 - `TRANSLATION_MAX_CONCURRENCY`
 - `TRANSLATION_CHUNK_SIZE_LIMIT`
 
@@ -252,10 +253,13 @@ fn chunk_anchor_pdf(page_number: i64, part: Option<(i64, i64)>) -> serde_json::V
 - DOCX / TXT / Markdown / OCR 长文：
   - 按标题、空行段落和字符数切分
   - 使用 `第 N 段`
+  - 必须服从 `TRANSLATION_CHUNK_SIZE_LIMIT`
 - XLSX：
   - 按 `sheet + block` 切分，`display_label` 形如 `Sheet A / A1:D20`
+  - 必须服从 `TRANSLATION_CHUNK_SIZE_LIMIT`
 - 音频转写：
   - 按时间段切分，`display_label` 形如 `00:03:20 - 00:04:10`
+  - 必须服从 `TRANSLATION_CHUNK_SIZE_LIMIT`
 
 - [ ] **Step 5: 解析完成后重置并回写文件级翻译聚合字段**
 
@@ -513,6 +517,7 @@ END;
 
 evidence 搜索返回至少新增：
 
+- `language_mode`
 - `chunk_id`
 - `chunk_index`
 - `display_label`
@@ -528,6 +533,12 @@ evidence 搜索返回至少新增：
 Run: `cargo test -p legalminds-server --test translation_smoke`
 
 Expected: PASS，包含旧文件回退和 `translation_incomplete` 分支。
+
+必须写成测试断言的规则：
+
+- 新文件 `language_mode=zh` 且翻译未覆盖全部 chunk 时，只查中文 FTS，不查原文 FTS
+- 此时返回 `translation_incomplete=true`
+- 同时返回 `source_fallback=false`
 
 - [ ] **Step 5: 提交**
 
