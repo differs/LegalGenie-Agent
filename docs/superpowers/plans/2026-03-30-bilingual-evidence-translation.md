@@ -21,6 +21,8 @@
   - 新建 chunk 级 FTS 表和触发器
 - Modify: `server/src/config.rs`
   - 新增翻译 provider 配置
+- Modify: `server/src/state.rs`
+  - 挂载可注入的 `TranslationProvider`
 - Modify: `server/src/lib.rs`
   - 注册新模块
 
@@ -56,6 +58,9 @@
   - 默认双语阅读
   - 视图切换
   - 翻译状态与重试
+- Modify: `frontend/src/pages/search.rs`
+  - `language_mode`
+  - bilingual evidence hit 展示与 fallback 标记
 
 ### Tests
 
@@ -75,6 +80,7 @@
 - Create: `server/migrations/0014_evidence_file_translation.sql`
 - Create: `server/migrations/0015_search_evidence_chunks.sql`
 - Modify: `server/src/config.rs`
+- Modify: `server/src/state.rs`
 - Modify: `server/src/lib.rs`
 - Test: `server/tests/translation_smoke.rs`
 
@@ -145,6 +151,15 @@ CREATE TABLE evidence_file_chunks (
 ```
 
 - [ ] **Step 4: 增加配置项并让测试环境可构建**
+
+配置名固定为：
+
+- `TRANSLATION_PROVIDER`
+- `TRANSLATION_BASE_URL`
+- `TRANSLATION_API_KEY`
+- `TRANSLATION_MODEL`
+- `TRANSLATION_MAX_CONCURRENCY`
+- `TRANSLATION_CHUNK_SIZE_LIMIT`
 
 Run: `cargo test -p legalminds-server --test translation_smoke translated_chunk_schema_is_available -- --exact`
 
@@ -226,13 +241,29 @@ fn chunk_anchor_pdf(page_number: i64, part: Option<(i64, i64)>) -> serde_json::V
 }
 ```
 
-- [ ] **Step 4: 解析完成后更新文件级 chunk 计数，但不改动旧 `parsed_text` 兼容行为**
+- [ ] **Step 4: 把各文件类型的 chunk 规则写死到实现与测试**
+
+至少覆盖：
+
+- PDF：
+  - 默认每页一个 chunk
+  - 如单页字符数超过 `TRANSLATION_CHUNK_SIZE_LIMIT`，页内按段落再细切
+  - `display_label` 使用 `第 N 页` 或 `第 N 页(i/total)`
+- DOCX / TXT / Markdown / OCR 长文：
+  - 按标题、空行段落和字符数切分
+  - 使用 `第 N 段`
+- XLSX：
+  - 按 `sheet + block` 切分，`display_label` 形如 `Sheet A / A1:D20`
+- 音频转写：
+  - 按时间段切分，`display_label` 形如 `00:03:20 - 00:04:10`
+
+- [ ] **Step 5: 解析完成后更新文件级 chunk 计数，但不改动旧 `parsed_text` 兼容行为**
 
 Run: `cargo test -p legalminds-server --test translation_smoke parsing_creates_chunks_for_uploaded_file -- --exact`
 
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
 git add server/src/parser.rs server/tests/translation_smoke.rs
@@ -245,6 +276,7 @@ git commit -m "feat: persist parsed evidence chunks"
 - Create: `server/src/translation.rs`
 - Modify: `server/src/parser.rs`
 - Modify: `server/src/config.rs`
+- Modify: `server/src/state.rs`
 - Test: `server/tests/translation_smoke.rs`
 
 - [ ] **Step 1: 写失败测试，锁定解析完成后会自动推进翻译状态**
@@ -279,17 +311,27 @@ pub trait TranslationProvider: Send + Sync {
     async fn translate(&self, source_text: &str, target_language: &str) -> anyhow::Result<TranslationResult>;
 }
 
+#[derive(Clone)]
+pub struct AppState {
+    pub translation_provider: Arc<dyn TranslationProvider>,
+}
+
 pub async fn enqueue_translation(
-    pool: SqlitePool,
-    config: AppConfig,
+    state: AppState,
     evidence_id: String,
 ) -> anyhow::Result<()> {
     tokio::spawn(async move {
-        let _ = translate_file_chunks(pool, config, evidence_id).await;
+        let _ = translate_file_chunks(state, evidence_id).await;
     });
     Ok(())
 }
 ```
+
+测试 wiring 也必须明确：
+
+- `build_test_app_with_fake_translation()` 基于现有 `build_test_app()` 复制一份 builder
+- 在 `AppState` 中注入 `Arc<FakeTranslationProvider>`
+- fake provider 返回稳定中译文，避免测试依赖外网模型
 
 - [ ] **Step 4: 实现幂等、重试、并发限制、审计和文件级状态聚合**
 
@@ -433,6 +475,13 @@ CREATE TRIGGER evidence_chunks_au AFTER UPDATE ON evidence_file_chunks BEGIN
   INSERT INTO search_evidence_chunks_translated(rowid, translated_text)
   VALUES (new.rowid, coalesce(new.translated_text, ''));
 END;
+
+CREATE TRIGGER evidence_chunks_ad AFTER DELETE ON evidence_file_chunks BEGIN
+  INSERT INTO search_evidence_chunks_source(search_evidence_chunks_source, rowid, source_text)
+  VALUES('delete', old.rowid, old.source_text);
+  INSERT INTO search_evidence_chunks_translated(search_evidence_chunks_translated, rowid, translated_text)
+  VALUES('delete', old.rowid, old.translated_text);
+END;
 ```
 
 - [ ] **Step 4: 扩展 evidence 搜索响应契约，并实现 `zh` 未翻译完成语义**
@@ -449,6 +498,7 @@ evidence 搜索返回至少新增：
 - `match_start_offset`
 - `match_end_offset`
 - `translation_incomplete`
+- `source_fallback`
 
 Run: `cargo test -p legalminds-server --test translation_smoke`
 
@@ -467,6 +517,7 @@ git commit -m "feat: add chunk-based bilingual evidence search"
 - Modify: `frontend/src/models.rs`
 - Modify: `frontend/src/api.rs`
 - Modify: `frontend/src/pages/files.rs`
+- Modify: `frontend/src/pages/search.rs`
 - Test: `frontend/src/api.rs`
 - Test: `frontend/src/pages/files.rs`
 
@@ -510,6 +561,7 @@ pub async fn post_retry_translation(...) -> Result<serde_json::Value, String> { 
 
 - 老文件无 chunk 时，显示降级提示并退回整份原文阅读
 - `translation_incomplete=true` 时，显示“中文索引构建中，可切到原文或双语搜索”
+- 搜索页新增 `language_mode = zh | source | bilingual` 切换，并识别 `source_fallback` 标记
 
 Run: `cargo test -p legalminds-frontend`
 
@@ -534,8 +586,16 @@ git commit -m "feat: add bilingual evidence reader UI"
 ```rust
 #[tokio::test]
 async fn legacy_file_without_chunks_still_remains_usable() {
-    // prepare legacy row with parsed_text only
-    // assert file detail still loads and search returns fallback marker
+    let (app, _tmp, pool) = build_test_app_with_pool().await;
+    let token = register_user(&app, "legacy_user", "legacy_user@example.com").await.1;
+    let case_id = create_case(&app, &token, "Legacy Case").await;
+    let file_id = insert_legacy_file_row_with_parsed_text_only(&pool, &case_id, "legacy.txt", "Legacy source text").await;
+
+    let detail = request_json(&app, Method::GET, &format!("/api/v1/files/{file_id}"), Some(&token), json!({})).await;
+    assert_eq!(detail.0, StatusCode::OK);
+
+    let search = request_json(&app, Method::GET, "/api/v1/search/evidence?q=Legacy&language_mode=zh", Some(&token), json!({})).await;
+    assert_eq!(search.1["data"]["items"][0]["source_fallback"], true);
 }
 ```
 
@@ -551,7 +611,12 @@ cargo test -p legalminds-frontend
 
 Expected: 全绿
 
-- [ ] **Step 3: 验证 web 和 desktop 构建**
+- [ ] **Step 3: 验证 web 和 desktop 构建，并确认 files/search 页面会自动刷新翻译状态**
+
+要求：
+
+- Files 页面轮询不只盯 `parse_status=processing`，也要盯 `translation_status=processing`
+- Search 页面默认 `zh`，但可切 `source/bilingual`
 
 Run:
 
