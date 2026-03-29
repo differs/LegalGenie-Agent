@@ -257,7 +257,19 @@ fn chunk_anchor_pdf(page_number: i64, part: Option<(i64, i64)>) -> serde_json::V
 - 音频转写：
   - 按时间段切分，`display_label` 形如 `00:03:20 - 00:04:10`
 
-- [ ] **Step 5: 解析完成后更新文件级 chunk 计数，但不改动旧 `parsed_text` 兼容行为**
+- [ ] **Step 5: 解析完成后重置并回写文件级翻译聚合字段**
+
+每次重解析并重建 chunks 时，必须同步重置：
+
+- `translation_status = 'pending'`
+- `translation_error = NULL`
+- `translated_chunk_count = 0`
+- `failed_chunk_count = 0`
+- `source_language = NULL`
+- `translation_model = NULL`
+- `translation_provider = NULL`
+
+然后再回写新的 `chunk_count`，避免旧翻译状态污染新一轮 chunks。
 
 Run: `cargo test -p legalminds-server --test translation_smoke parsing_creates_chunks_for_uploaded_file -- --exact`
 
@@ -400,6 +412,19 @@ Router::new()
     .route("/:id/translation", get(get_translation_status))
     .route("/:id/translate/retry", post(retry_translation));
 ```
+
+`GET /api/v1/files/:id/translation` 最小返回契约必须写死为：
+
+- `translation_status`
+- `translation_error`
+- `chunk_count`
+- `translated_chunk_count`
+- `failed_chunk_count`
+- `source_language`
+- `target_language`
+- `translation_provider`
+- `translation_model`
+- `translation_incomplete`
 
 - [ ] **Step 4: 增加权限校验、分页、`view_mode`、错误语义和审计最小元数据**
 
