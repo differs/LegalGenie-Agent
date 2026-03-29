@@ -392,7 +392,25 @@ git commit -m "fix: adapt frontend pages to dioxus 0.7 rendering rules"
 
 - [ ] **Step 1: 补 desktop 编译进 CI**
 
-在 `.github/workflows/ci.yml` 里保留现有 wasm 构建，并新增：
+在 `.github/workflows/ci.yml` 里保留现有 wasm 构建，并先补 Ubuntu/Linux desktop 所需系统依赖。按 Dioxus 0.7 官方 Getting Started 的 Ubuntu 依赖清单，新增一个安装步骤：
+
+```bash
+sudo apt update
+sudo apt install -y \
+  libwebkit2gtk-4.1-dev \
+  build-essential \
+  curl \
+  wget \
+  file \
+  libxdo-dev \
+  xdotool \
+  libssl-dev \
+  libayatana-appindicator3-dev \
+  librsvg2-dev \
+  lld
+```
+
+然后新增 desktop 编译步骤：
 
 ```bash
 cargo build -p legalminds-frontend --no-default-features --features desktop
@@ -440,7 +458,61 @@ git commit -m "docs: update frontend runbooks for dioxus 0.7.3"
 - No new files by default
 - Modify only if verification暴露真实问题
 
-- [ ] **Step 1: 运行完整自动验证**
+- [ ] **Step 1: 准备 smoke 前置环境**
+
+先把 backend 与 smoke 数据准备清楚，避免把环境问题误判成升级回归。
+
+后端统一按前端默认 API base 跑在 `8001`：
+
+```bash
+SERVER_PORT=8001 cargo run -p legalminds-server
+```
+
+然后用一个独立终端准备最小 smoke 数据。使用标准库 `python3` 直接创建账号和案件，避免依赖 `jq`：
+
+```bash
+python3 - <<'PY'
+import json
+import time
+import urllib.request
+
+base = "http://127.0.0.1:8001"
+username = f"smoke_{int(time.time())}"
+password = "SmokePass123"
+email = f"{username}@example.com"
+
+def post(path, payload, token=None):
+    body = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(f"{base}{path}", data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        return json.load(resp)
+
+reg = post("/api/v1/auth/register", {
+    "username": username,
+    "email": email,
+    "password": password,
+    "real_name": "Smoke User",
+})
+token = reg["data"]["access_token"]
+case = post("/api/v1/cases", {
+    "name": "Dioxus 0.7 Smoke Case",
+    "description": "upgrade smoke",
+}, token=token)
+print("USERNAME=", username)
+print("PASSWORD=", password)
+print("CASE_ID=", case["data"]["id"])
+PY
+```
+
+Expected:
+
+- backend 运行在 `http://127.0.0.1:8001`
+- 拿到一组可直接用于 web/desktop smoke 的 `USERNAME` / `PASSWORD` / `CASE_ID`
+
+- [ ] **Step 2: 运行完整自动验证**
 
 Run:
 
@@ -455,7 +527,7 @@ Expected:
 
 - 全部通过
 
-- [ ] **Step 2: 验证 `dx serve`**
+- [ ] **Step 3: 验证 `dx serve`**
 
 Run:
 
@@ -468,11 +540,13 @@ Expected:
 - web 开发预览成功拉起
 - 不再出现 `dx 0.7.3` 与项目版本不兼容报错
 
-- [ ] **Step 3: 做 web 端手工 smoke**
+- [ ] **Step 4: 做 web 端手工 smoke**
 
 至少验证：
 
-1. 登录后仍需 `/auth/me` 验证才能进工作台
+1. 用 Step 1 生成的 `USERNAME` / `PASSWORD` 登录
+2. 登录后仍需 `/auth/me` 验证才能进工作台
+3. 把 `CASE_ID` 粘进左栏 Case Switcher 后，能进入案件上下文
 2. 进入案件后仍是聊天主轴工作台
 3. 快捷入口可以打开 Canvas
 4. Canvas 打开时 composer 仍可用
@@ -481,7 +555,7 @@ Expected:
 7. `Search / Logs / Files / Persons` 在缺少 token 或 `case_id` 时空态不炸
 8. `References` 在没有 inserted contexts 时仍正常显示空态
 
-- [ ] **Step 4: 做 desktop 端最小交互 smoke**
+- [ ] **Step 5: 做 desktop 端最小交互 smoke**
 
 Run:
 
@@ -492,11 +566,12 @@ cargo run -p legalminds-frontend --no-default-features --features desktop
 至少验证：
 
 1. 能进入认证页或工作台，不是空白窗口
-2. 登录或恢复会话后能进入聊天主轴工作台
-3. 能打开至少一个 Canvas
-4. Canvas 打开时 composer 仍存在并可聚焦
+2. 用 Step 1 生成的 `USERNAME` / `PASSWORD` 登录，或粘贴相同会话 token 恢复会话
+3. 把同一个 `CASE_ID` 粘进 Case Switcher 后能进入聊天主轴工作台
+4. 能打开至少一个 Canvas
+5. Canvas 打开时 composer 仍存在并可聚焦
 
-- [ ] **Step 5: 如果 smoke 暴露问题，修复后重跑全部验证**
+- [ ] **Step 6: 如果 smoke 暴露问题，修复后重跑全部验证**
 
 不要只重跑单个命令。任何运行时问题修复后，都回到：
 
@@ -506,7 +581,18 @@ cargo build -p legalminds-frontend --target wasm32-unknown-unknown
 cargo build -p legalminds-frontend --no-default-features --features desktop
 ```
 
-- [ ] **Step 6: Commit**
+然后还必须重跑：
+
+```bash
+dx serve
+```
+
+并重新完成：
+
+- web 端手工 smoke
+- desktop 端最小交互 smoke
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add Cargo.toml frontend/Cargo.toml Dioxus.toml frontend/src .github/workflows/ci.yml README.md docs/RUNBOOK_LOCAL.md docs/RUNBOOK_DOCKER.md Cargo.lock
