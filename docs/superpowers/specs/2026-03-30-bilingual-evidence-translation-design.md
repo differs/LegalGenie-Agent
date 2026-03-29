@@ -256,7 +256,7 @@ LegalMinds 当前已经具备证据文件上传、异步解析、解析结果下
 `display_label` 来源约定：
 
 - `display_label` 作为稳定展示字段持久化保存
-- PDF 形如 `第 12 页`
+- PDF 形如 `第 12 页`；如单页细切，则形如 `第 12 页(1/3)`
 - 非 PDF 形如 `第 8 段`、`Sheet A / A1:D20`、`00:03:20 - 00:04:10`
 
 命中偏移语义约定：
@@ -324,7 +324,7 @@ V1 约束：
 - 幂等键：`(evidence_id, chunk_index, translation_provider, translation_model, source_text_hash)`
 - 如同一幂等键已成功写入，不得重复落库覆盖
 
-`POST /translate/retry` 的 `scope` 语义：
+`POST /api/v1/files/:id/translate/retry` 的 `scope` 语义：
 
 - `failed`：只重试失败 chunk
 - `all`：重试所有未完成 chunk，并对失败 chunk 重新入队；已成功且幂等键不变的 chunk 直接跳过，不覆盖既有结果
@@ -528,6 +528,16 @@ V1 搜索实现前提：
     - `translation_model`
 
 ### 搜索扩展
+
+在现有搜索路由基础上扩展 `language_mode` 参数，至少覆盖：
+
+- `GET /api/v1/search`
+- `GET /api/v1/search/evidence`
+
+请求与响应增量：
+
+- 请求新增 `language_mode`
+- evidence 命中结果新增 chunk 锚点、动态命中偏移和双语 snippet 字段
 
 搜索接口增加 `language_mode` 参数：
 
