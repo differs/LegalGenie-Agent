@@ -400,6 +400,9 @@ pub async fn enqueue_translation(
 
 - chunk 级状态使用：`pending -> processing -> done | failed`
 - 解析完成并成功入库 chunks 后，文件级 `translation_status` 立即置为 `processing`
+- 文件翻译启动时，先把 `translation_provider` 和 `translation_model` 固定写入 `evidence_files`
+- 同一文件在本轮翻译与后续自动/手动重试中，所有 chunk 一律沿用该文件级 `translation_provider/translation_model`
+- 只有 reparse 重置文件级翻译聚合字段后，provider/model 才允许变更
 - 自动重试上限 `3`
 - 退避 `1m / 5m / 30m`
 - 幂等键：`(evidence_id, chunk_index, translation_provider, translation_model, source_text_hash)`
@@ -413,8 +416,11 @@ pub async fn enqueue_translation(
   - 只在 `server/src/main.rs` 中，在 `let state = AppState::new(...)` 之后调用一次 `translation::start_retry_poller_once(state.clone())`
   - 通过 `AtomicBool` / `OnceCell` 保证整个进程只启动一个 poller
   - `tokio::spawn`
-  - 每 `30s` 扫描一次 `evidence_file_chunks` 表中 `next_retry_at <= now()` 且 `translation_status IN ('pending', 'failed')` 的 chunk
+  - 每 `30s` 扫描一次 `evidence_file_chunks` 表中：
+    - `next_retry_at <= now()` 且 `translation_status IN ('pending', 'failed')`
+    - 或 `translation_status = 'processing'` 且 `last_attempt_at` 超过 `10m` 未更新
   - 重新入队 chunk 翻译任务
+  - 对超时 `processing` chunk，先原子地重置为 `pending`，再重新入队，避免并发重复执行
 
 Run: `cargo test -p legalminds-server --test translation_smoke`
 
