@@ -23,6 +23,7 @@ pub struct AppConfig {
     pub database_url: String,
     pub cors_origins: CorsOrigins,
     pub force_https: bool,
+    pub trust_proxy_headers: bool,
     pub jwt_secret: String,
     pub access_token_expire_minutes: i64,
     pub refresh_token_expire_days: i64,
@@ -42,6 +43,63 @@ pub enum CorsOrigins {
     AllowList(Vec<String>),
 }
 
+#[derive(Debug, Clone)]
+pub struct TranslationConfig {
+    pub provider: String,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub target_language: String,
+    pub max_concurrency: u16,
+    pub chunk_size_limit: u32,
+}
+
+impl Default for TranslationConfig {
+    fn default() -> Self {
+        Self {
+            provider: "disabled".to_string(),
+            base_url: None,
+            api_key: None,
+            model: None,
+            target_language: "en".to_string(),
+            max_concurrency: 2,
+            chunk_size_limit: 2_000,
+        }
+    }
+}
+
+impl TranslationConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let defaults = Self::default();
+        let provider = env_string("TRANSLATION_PROVIDER", &defaults.provider);
+        let base_url = env_optional_string("TRANSLATION_BASE_URL");
+        let api_key = env_optional_string("TRANSLATION_API_KEY");
+        let model = env_optional_string("TRANSLATION_MODEL");
+        let target_language =
+            env_string("TRANSLATION_TARGET_LANGUAGE", &defaults.target_language);
+        let max_concurrency = env_u16("TRANSLATION_MAX_CONCURRENCY", defaults.max_concurrency)?;
+        let chunk_size_limit =
+            env_u32("TRANSLATION_CHUNK_SIZE_LIMIT", defaults.chunk_size_limit)?;
+
+        if max_concurrency == 0 {
+            anyhow::bail!("TRANSLATION_MAX_CONCURRENCY must be >= 1");
+        }
+        if chunk_size_limit == 0 {
+            anyhow::bail!("TRANSLATION_CHUNK_SIZE_LIMIT must be >= 1");
+        }
+
+        Ok(Self {
+            provider,
+            base_url,
+            api_key,
+            model,
+            target_language,
+            max_concurrency,
+            chunk_size_limit,
+        })
+    }
+}
+
 impl AppConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let app_env = AppEnv::from_str(&env_string("APP_ENV", "development"));
@@ -49,6 +107,7 @@ impl AppConfig {
         let server_port = env_u16("SERVER_PORT", 8000)?;
         let database_url = env_string("DATABASE_URL", "sqlite://data/legal_minds.db");
         let force_https = env_bool("FORCE_HTTPS", false)?;
+        let trust_proxy_headers = env_bool("TRUST_PROXY_HEADERS", false)?;
         let jwt_secret = env_string("JWT_SECRET", "change-me-to-a-long-random-secret");
         let access_token_expire_minutes = env_i64("ACCESS_TOKEN_EXPIRE_MINUTES", 60)?;
         let refresh_token_expire_days = env_i64("REFRESH_TOKEN_EXPIRE_DAYS", 7)?;
@@ -80,6 +139,7 @@ impl AppConfig {
             database_url,
             cors_origins,
             force_https,
+            trust_proxy_headers,
             jwt_secret,
             access_token_expire_minutes,
             refresh_token_expire_days,
@@ -127,9 +187,23 @@ fn env_string(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+fn env_optional_string(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 fn env_u16(key: &str, default: u16) -> anyhow::Result<u16> {
     match std::env::var(key) {
         Ok(v) => Ok(v.parse::<u16>()?),
+        Err(_) => Ok(default),
+    }
+}
+
+fn env_u32(key: &str, default: u32) -> anyhow::Result<u32> {
+    match std::env::var(key) {
+        Ok(v) => Ok(v.parse::<u32>()?),
         Err(_) => Ok(default),
     }
 }

@@ -1,5 +1,5 @@
 use anyhow::Context;
-use legalminds_server::{create_pool, router, AppConfig, AppState};
+use legalminds_server::{create_pool, router, AppConfig, AppState, TranslationConfig};
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -12,6 +12,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = AppConfig::from_env().context("load config")?;
+    let translation = TranslationConfig::from_env().context("load translation config")?;
 
     tokio::fs::create_dir_all(&config.storage_path)
         .await
@@ -42,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("run migrations")?;
 
-    let state = AppState::new(config, pool);
+    let state = AppState::new_with_translation(config, pool, translation);
     let app = router(state.clone());
 
     let addr = state.config.bind_addr();
