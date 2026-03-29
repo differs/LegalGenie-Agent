@@ -82,6 +82,57 @@
 - Modify: `frontend/src/api.rs`
   - 增加 query/path 组装单测
 
+## API Contracts
+
+### `GET /api/v1/files/:id/chunks`
+
+- 排序：固定 `chunk_index ASC`
+- 响应项最少包含：
+  - `id`
+  - `chunk_index`
+  - `page_number`
+  - `segment_number`
+  - `chunk_kind`
+  - `display_label`
+  - `source_text`
+  - `translated_text`
+  - `translation_status`
+  - `translation_error`
+  - `anchor_json`
+
+### `GET /api/v1/files/:id/translation`
+
+- 最少返回：
+  - `translation_status`
+  - `translation_error`
+  - `chunk_count`
+  - `translated_chunk_count`
+  - `failed_chunk_count`
+  - `source_language`
+  - `target_language`
+  - `translation_provider`
+  - `translation_model`
+  - `translation_incomplete`
+
+### Evidence Search Result
+
+- 继续沿用 `data.results`
+- evidence 命中最少返回：
+  - `file_id`
+  - `file_name`
+  - `chunk_id`
+  - `chunk_index`
+  - `display_label`
+  - `anchor_json`
+  - `language_mode`
+  - `matched_language`
+  - `snippet_source`
+  - `snippet_translated`
+  - `match_start_offset`
+  - `match_end_offset`
+  - `translation_incomplete`
+  - `source_fallback`
+
 ## Task 1: 建立数据库真源和翻译配置
 
 **Files:**
@@ -226,6 +277,7 @@ Expected: FAIL，`/files/:id/chunks` 未实现或 chunk 为空。
 
 ```rust
 struct ParsedChunk {
+    id: String,
     chunk_index: i64,
     page_number: Option<i64>,
     segment_number: Option<i64>,
@@ -258,6 +310,8 @@ fn chunk_anchor_pdf(page_number: i64, part: Option<(i64, i64)>) -> serde_json::V
     })
 }
 ```
+
+chunk `id` 规则固定为 `Uuid::new_v4().to_string()`，不要混用自增或派生 key。
 
 - [ ] **Step 4: 把各文件类型的 chunk 规则写死到实现与测试**
 
@@ -469,6 +523,9 @@ async fn file_detail_and_chunk_endpoints_expose_translation_state() {
 
     let chunks = request_json(&app, &token, &format!("/api/v1/files/{file_id}/chunks?page=1&page_size=20&view_mode=bilingual")).await;
     assert_eq!(chunks["data"]["items"][0]["translation_status"], "done");
+    assert!(chunks["data"]["items"][0]["page_number"].is_number() || chunks["data"]["items"][0]["segment_number"].is_number());
+    assert!(chunks["data"]["items"][0]["chunk_kind"].is_string());
+    assert!(chunks["data"]["items"][0]["translation_error"].is_null() || chunks["data"]["items"][0]["translation_error"].is_string());
 }
 ```
 
@@ -675,10 +732,14 @@ Expected: FAIL
 pub struct EvidenceFileChunkItem {
     pub id: String,
     pub chunk_index: i64,
+    pub page_number: Option<i64>,
+    pub segment_number: Option<i64>,
+    pub chunk_kind: String,
     pub display_label: String,
     pub source_text: String,
     pub translated_text: Option<String>,
     pub translation_status: String,
+    pub translation_error: Option<String>,
     pub anchor_json: serde_json::Value,
 }
 
