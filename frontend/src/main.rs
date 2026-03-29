@@ -18,19 +18,19 @@ use workspace::view_model::{
     suggested_action_summaries,
 };
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(not(feature = "desktop"), feature = "web"))]
 fn main() {
-    dioxus_web::launch::launch_cfg(App, dioxus_web::Config::default());
+    dioxus::LaunchBuilder::web().launch(App);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "desktop")]
 fn main() {
-    let cfg = dioxus_desktop::Config::new().with_window(
-        dioxus_desktop::WindowBuilder::new()
+    let cfg = dioxus::desktop::Config::new().with_window(
+        dioxus::desktop::WindowBuilder::new()
             .with_title("LegalMinds")
-            .with_inner_size(dioxus_desktop::LogicalSize::new(1280.0, 820.0)),
+            .with_inner_size(dioxus::desktop::LogicalSize::new(1280.0, 820.0)),
     );
-    dioxus_desktop::launch::launch(App, Vec::new(), cfg);
+    dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(App);
 }
 
 #[derive(Clone, Copy)]
