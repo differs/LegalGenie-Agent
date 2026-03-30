@@ -49,6 +49,7 @@ pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, SqlitePool) {
         database_url: "sqlite::memory:".to_string(),
         cors_origins: CorsOrigins::Any,
         force_https: false,
+        trust_proxy_headers: false,
         jwt_secret: "test-secret-please-change-32-chars-min".to_string(),
         access_token_expire_minutes: 60,
         refresh_token_expire_days: 7,

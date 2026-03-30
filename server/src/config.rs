@@ -23,6 +23,7 @@ pub struct AppConfig {
     pub database_url: String,
     pub cors_origins: CorsOrigins,
     pub force_https: bool,
+    pub trust_proxy_headers: bool,
     pub jwt_secret: String,
     pub access_token_expire_minutes: i64,
     pub refresh_token_expire_days: i64,
@@ -60,7 +61,7 @@ impl Default for TranslationConfig {
             base_url: None,
             api_key: None,
             model: None,
-            target_language: "en".to_string(),
+            target_language: "zh-CN".to_string(),
             max_concurrency: 2,
             chunk_size_limit: 2_000,
         }
@@ -106,6 +107,7 @@ impl AppConfig {
         let server_port = env_u16("SERVER_PORT", 8000)?;
         let database_url = env_string("DATABASE_URL", "sqlite://data/legal_minds.db");
         let force_https = env_bool("FORCE_HTTPS", false)?;
+        let trust_proxy_headers = env_bool("TRUST_PROXY_HEADERS", false)?;
         let jwt_secret = env_string("JWT_SECRET", "change-me-to-a-long-random-secret");
         let access_token_expire_minutes = env_i64("ACCESS_TOKEN_EXPIRE_MINUTES", 60)?;
         let refresh_token_expire_days = env_i64("REFRESH_TOKEN_EXPIRE_DAYS", 7)?;
@@ -137,6 +139,7 @@ impl AppConfig {
             database_url,
             cors_origins,
             force_https,
+            trust_proxy_headers,
             jwt_secret,
             access_token_expire_minutes,
             refresh_token_expire_days,
