@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::state::AppState;
 use anyhow::{anyhow, Context};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -76,21 +77,16 @@ struct ExcelParsedBlock {
     text: String,
 }
 
-pub async fn enqueue_parse(
-    pool: SqlitePool,
-    config: AppConfig,
-    file_id: String,
-    force: bool,
-) -> anyhow::Result<bool> {
-    let started = mark_processing(&pool, &file_id, force).await?;
+pub async fn enqueue_parse(state: AppState, file_id: String, force: bool) -> anyhow::Result<bool> {
+    let started = mark_processing(&state.pool, &file_id, force).await?;
     if !started {
         return Ok(false);
     }
 
     tokio::spawn(async move {
-        if let Err(e) = parse_and_update(&pool, &config, &file_id).await {
+        if let Err(e) = parse_and_update(&state, &file_id).await {
             tracing::error!(file_id = %file_id, error = %e, "parse failed");
-            let _ = mark_failed(&pool, &file_id, &e.to_string()).await;
+            let _ = mark_failed(&state.pool, &file_id, &e.to_string()).await;
         }
     });
 
@@ -115,10 +111,12 @@ async fn mark_processing(pool: &SqlitePool, file_id: &str, force: bool) -> anyho
 
 async fn mark_failed(pool: &SqlitePool, file_id: &str, err: &str) -> anyhow::Result<()> {
     let err = truncate_string(err, 2000);
+    let parsed_at = precise_timestamp();
     sqlx::query(
-        "UPDATE evidence_files SET parse_status = 'failed', parse_error = ?1, parsed_at = CURRENT_TIMESTAMP WHERE id = ?2",
+        "UPDATE evidence_files SET parse_status = 'failed', parse_error = ?1, parsed_at = ?2 WHERE id = ?3",
     )
     .bind(err)
+    .bind(parsed_at)
     .bind(file_id)
     .execute(pool)
     .await
@@ -133,6 +131,7 @@ async fn persist_chunks_and_mark_done(
     mut chunks: Vec<FileChunk>,
 ) -> anyhow::Result<()> {
     chunks.sort_by_key(|c| c.chunk_index);
+    let parsed_at = precise_timestamp();
     let mut tx = pool.begin().await.context("begin parse persistence tx")?;
 
     sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
@@ -195,7 +194,7 @@ async fn persist_chunks_and_mark_done(
             duration = ?3,
             parse_status = 'done',
             parse_error = NULL,
-            parsed_at = CURRENT_TIMESTAMP,
+            parsed_at = ?4,
             translation_status = 'pending',
             translation_error = NULL,
             translated_chunk_count = 0,
@@ -203,13 +202,14 @@ async fn persist_chunks_and_mark_done(
             source_language = NULL,
             translation_model = NULL,
             translation_provider = NULL,
-            chunk_count = ?4
-        WHERE id = ?5
+            chunk_count = ?5
+        WHERE id = ?6
         "#,
     )
     .bind(out.parsed_text)
     .bind(out.page_count)
     .bind(out.duration)
+    .bind(parsed_at)
     .bind(chunks.len() as i64)
     .bind(&row.id)
     .execute(&mut *tx)
@@ -230,8 +230,7 @@ struct EvidenceFileToParse {
 }
 
 async fn parse_and_update(
-    pool: &SqlitePool,
-    config: &AppConfig,
+    state: &AppState,
     file_id: &str,
 ) -> anyhow::Result<()> {
     let row: Option<EvidenceFileToParse> = sqlx::query_as(
@@ -243,7 +242,7 @@ async fn parse_and_update(
         "#,
     )
     .bind(file_id)
-    .fetch_optional(pool)
+    .fetch_optional(&state.pool)
     .await
     .context("fetch evidence_files row")?;
 
@@ -251,13 +250,13 @@ async fn parse_and_update(
         return Ok(());
     };
 
-    let full_path = PathBuf::from(&config.storage_path).join(&row.storage_path);
+    let full_path = PathBuf::from(&state.config.storage_path).join(&row.storage_path);
     let kind = detect_kind(&row.original_name, &row.file_type);
 
     let mut out = match kind {
         FileKind::Pdf => parse_pdf(&full_path).await?,
-        FileKind::Image => parse_image(&full_path, config).await?,
-        FileKind::Audio => parse_audio(&full_path, config, &row.id).await?,
+        FileKind::Image => parse_image(&full_path, &state.config).await?,
+        FileKind::Audio => parse_audio(&full_path, &state.config, &row.id).await?,
         FileKind::Text => parse_text(&full_path).await?,
         FileKind::Excel => parse_excel(&full_path).await?,
         FileKind::Docx => parse_docx(&full_path).await?,
@@ -273,11 +272,14 @@ async fn parse_and_update(
 
     // Guard runaway output (and keep json/db consistent).
     out.parsed_text = truncate_string(&out.parsed_text, 50_000_000);
-    let artifact_path = write_parsed_artifact(config, &row, kind, &out).await?;
+    let artifact_path = write_parsed_artifact(&state.config, &row, kind, &out).await?;
 
     let chunks = derive_chunks(kind, &out, translation_chunk_size_limit());
-    match persist_chunks_and_mark_done(pool, &row, out, chunks).await {
-        Ok(()) => Ok(()),
+    match persist_chunks_and_mark_done(&state.pool, &row, out, chunks).await {
+        Ok(()) => {
+            crate::translation::start_file_translation(state.clone(), row.id.clone()).await?;
+            Ok(())
+        }
         Err(e) => {
             // Avoid visible split-brain: artifact looks new but DB still has old parse state.
             let _ = tokio::fs::remove_file(&artifact_path).await;
@@ -1222,7 +1224,7 @@ fn path_str(path: &Path) -> anyhow::Result<&str> {
     path.to_str().ok_or_else(|| anyhow!("non-utf8 path"))
 }
 
-fn source_text_hash(text: &str) -> String {
+pub(crate) fn source_text_hash(text: &str) -> String {
     // Deterministic FNV-1a 64-bit hash for chunk dedupe/indexing.
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in text.as_bytes() {
@@ -1234,6 +1236,10 @@ fn source_text_hash(text: &str) -> String {
 
 fn truncate_string(s: impl AsRef<str>, max_chars: usize) -> String {
     s.as_ref().chars().take(max_chars).collect()
+}
+
+fn precise_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
 #[cfg(test)]

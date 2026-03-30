@@ -308,12 +308,7 @@ async fn parse_file(
         return Err(AppError::conflict("file is already processing"));
     }
 
-    let started = crate::parser::enqueue_parse(
-        state.pool.clone(),
-        state.config.clone(),
-        row.id.clone(),
-        true,
-    )
+    let started = crate::parser::enqueue_parse(state.clone(), row.id.clone(), true)
     .await
     .map_err(|e| AppError::internal(format!("enqueue parse failed: {e}")))?;
 

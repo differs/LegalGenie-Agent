@@ -1,16 +1,148 @@
 mod test_support;
 
+use anyhow::anyhow;
 use axum::http::{Method, StatusCode};
-use serde_json::Value;
-use sqlx::Row;
-use test_support::{
-    build_test_app_with_pool, create_case, register_user, request_json, upload_text_file,
-    wait_for_file_parse_done,
+use legalminds_server::translation::{
+    self, TranslationProvider, TranslationRequest, TranslationResult,
 };
+use legalminds_server::{
+    router, AppConfig, AppEnv, AppState, CorsOrigins, TranslationConfig,
+};
+use serde_json::Value;
+use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tempfile::TempDir;
+use test_support::{
+    create_case, register_user, request_json, upload_text_file, wait_for_file_parse_done,
+};
+use tokio::sync::Notify;
+
+#[derive(Clone, Default)]
+struct FakeTranslationProvider {
+    provider_name: String,
+    model_name: Option<String>,
+    responses: Arc<Mutex<HashMap<String, VecDeque<FakeProviderResponse>>>>,
+    call_counts: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+#[derive(Clone)]
+enum FakeProviderResponse {
+    Success {
+        translated_text: String,
+        source_language: Option<String>,
+    },
+    Failure {
+        message: String,
+    },
+    Wait {
+        notify: Arc<Notify>,
+        next: Box<FakeProviderResponse>,
+    },
+}
+
+impl FakeTranslationProvider {
+    fn new(provider_name: impl Into<String>, model_name: Option<&str>) -> Self {
+        Self {
+            provider_name: provider_name.into(),
+            model_name: model_name.map(str::to_string),
+            responses: Arc::new(Mutex::new(HashMap::new())),
+            call_counts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn push_responses(
+        &self,
+        source_text: &str,
+        responses: impl IntoIterator<Item = FakeProviderResponse>,
+    ) {
+        self.responses
+            .lock()
+            .expect("lock fake responses")
+            .insert(source_text.to_string(), responses.into_iter().collect());
+    }
+
+    fn call_count(&self, source_text: &str) -> usize {
+        self.call_counts
+            .lock()
+            .expect("lock fake counts")
+            .get(source_text)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslationProvider for FakeTranslationProvider {
+    fn provider_name(&self) -> &str {
+        &self.provider_name
+    }
+
+    fn model_name(&self) -> Option<&str> {
+        self.model_name.as_deref()
+    }
+
+    async fn translate(
+        &self,
+        request: TranslationRequest,
+    ) -> anyhow::Result<TranslationResult> {
+        let _ = (
+            request.evidence_id.as_str(),
+            request.chunk_id.as_str(),
+            request.chunk_index,
+            request.target_language.as_str(),
+        );
+
+        {
+            let mut counts = self.call_counts.lock().expect("lock fake counts");
+            let entry = counts.entry(request.source_text.clone()).or_insert(0);
+            *entry += 1;
+        }
+
+        let response = self
+            .responses
+            .lock()
+            .expect("lock fake responses")
+            .get_mut(&request.source_text)
+            .and_then(|items| items.pop_front());
+
+        match response {
+            Some(FakeProviderResponse::Success {
+                translated_text,
+                source_language,
+            }) => Ok(TranslationResult {
+                translated_text,
+                source_language,
+            }),
+            Some(FakeProviderResponse::Failure { message }) => Err(anyhow!(message)),
+            Some(FakeProviderResponse::Wait { notify, next }) => {
+                notify.notified().await;
+                match *next {
+                    FakeProviderResponse::Success {
+                        translated_text,
+                        source_language,
+                    } => Ok(TranslationResult {
+                        translated_text,
+                        source_language,
+                    }),
+                    FakeProviderResponse::Failure { message } => Err(anyhow!(message)),
+                    FakeProviderResponse::Wait { .. } => {
+                        Err(anyhow!("nested wait fake response is unsupported"))
+                    }
+                }
+            }
+            None => Ok(TranslationResult {
+                translated_text: format!("ZH::{}", request.source_text),
+                source_language: Some("en".to_string()),
+            }),
+        }
+    }
+}
 
 #[tokio::test]
 async fn translated_chunk_schema_is_available() {
-    let (_app, _tmp, pool) = build_test_app_with_pool().await;
+    let (_app, _state, _tmp, pool, _provider) = build_test_app_with_fake_translation().await;
 
     let file_columns = sqlx::query("PRAGMA table_info(evidence_files)")
         .fetch_all(&pool)
@@ -80,19 +212,17 @@ async fn translated_chunk_schema_is_available() {
 }
 
 #[tokio::test]
-async fn parsing_creates_chunks_for_uploaded_file() {
-    let (app, _tmp, pool) = build_test_app_with_pool().await;
-    let (_user_id, token) = register_user(&app, "chunk-user", "chunk-user@example.com").await;
-    let case_id = create_case(&app, &token, "Chunk Case", "chunk parse checks").await;
-    let evidence_id = upload_text_file(&app, &token, &case_id, "note.txt", "Alpha\n\nBeta\n").await;
+async fn parsing_auto_starts_translation() {
+    let (app, _state, _tmp, pool, _provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(&app, "auto-translate", "auto-translate@example.com").await;
+    let case_id = create_case(&app, &token, "Auto Translation", "auto translation").await;
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "note.txt", "Alpha\n\nBeta\n").await;
 
     let detail = wait_for_file_parse_done(&app, &token, &evidence_id).await;
-    assert_eq!(detail.0, axum::http::StatusCode::OK);
-    assert_eq!(
-        detail.1["data"]["parse_status"].as_str().unwrap_or(""),
-        "done",
-        "expected parse_status=done"
-    );
+    assert_eq!(detail.0, StatusCode::OK);
+
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
 
     let file_row = sqlx::query(
         r#"
@@ -117,40 +247,39 @@ async fn parsing_creates_chunks_for_uploaded_file() {
     .expect("fetch evidence file");
 
     assert_eq!(file_row.get::<String, _>("parse_status"), "done");
-    assert_eq!(file_row.get::<String, _>("translation_status"), "pending");
-    assert_eq!(
-        file_row.get::<Option<String>, _>("translation_error"),
-        None,
-        "translation_error should be reset to NULL"
-    );
+    assert_eq!(file_row.get::<String, _>("translation_status"), "done");
+    assert_eq!(file_row.get::<Option<String>, _>("translation_error"), None);
     assert_eq!(
         file_row.get::<Option<String>, _>("source_language"),
-        None,
-        "source_language should be reset to NULL"
+        Some("en".to_string())
     );
     assert_eq!(
         file_row.get::<Option<String>, _>("translation_model"),
-        None,
-        "translation_model should be reset to NULL"
+        Some("fake-legal-v1".to_string())
     );
     assert_eq!(
         file_row.get::<Option<String>, _>("translation_provider"),
-        None,
-        "translation_provider should be reset to NULL"
+        Some("fake".to_string())
     );
-    assert_eq!(file_row.get::<i64, _>("translated_chunk_count"), 0);
-    assert_eq!(file_row.get::<i64, _>("failed_chunk_count"), 0);
+
+    let translated_chunk_count = file_row.get::<i64, _>("translated_chunk_count");
+    let failed_chunk_count = file_row.get::<i64, _>("failed_chunk_count");
+    let chunk_count = file_row.get::<i64, _>("chunk_count");
+
+    assert!(translated_chunk_count >= 2);
+    assert_eq!(failed_chunk_count, 0);
+    assert_eq!(translated_chunk_count, chunk_count);
 
     let chunk_rows = sqlx::query(
         r#"
         SELECT
             chunk_index,
-            segment_number,
-            chunk_kind,
-            display_label,
             source_text,
-            anchor_json,
-            translation_status
+            translated_text,
+            source_language,
+            target_language,
+            translation_status,
+            retry_count
         FROM evidence_file_chunks
         WHERE evidence_id = ?1
         ORDER BY chunk_index ASC
@@ -159,177 +288,102 @@ async fn parsing_creates_chunks_for_uploaded_file() {
     .bind(&evidence_id)
     .fetch_all(&pool)
     .await
-    .expect("fetch file chunks");
+    .expect("fetch translated chunks");
 
-    assert!(
-        chunk_rows.len() >= 2,
-        "expected at least two chunks for Alpha/Beta paragraphs, got {}",
-        chunk_rows.len()
-    );
-
-    let mut combined_source = String::new();
-    for (expected_index, row) in chunk_rows.iter().enumerate() {
-        assert_eq!(
-            row.get::<i64, _>("chunk_index"),
-            expected_index as i64,
-            "chunk_index must be sequential and ascending"
-        );
-        assert!(
-            row.get::<i64, _>("segment_number") > 0,
-            "text chunk segment_number must be > 0"
-        );
-        assert!(
-            !row.get::<String, _>("chunk_kind").trim().is_empty(),
-            "chunk_kind should not be empty"
-        );
-        assert!(
-            !row.get::<String, _>("display_label").trim().is_empty(),
-            "display_label should not be empty"
-        );
+    assert_eq!(chunk_rows.len() as i64, chunk_count);
+    for row in chunk_rows {
         let source_text = row.get::<String, _>("source_text");
-        assert!(
-            !source_text.trim().is_empty(),
-            "source_text should not be empty"
+        assert_eq!(row.get::<String, _>("translation_status"), "done");
+        assert_eq!(row.get::<i64, _>("retry_count"), 0);
+        assert_eq!(
+            row.get::<Option<String>, _>("translated_text"),
+            Some(format!("ZH::{source_text}"))
         );
-        combined_source.push_str(&source_text);
-        combined_source.push('\n');
-
-        let anchor_raw = row.get::<String, _>("anchor_json");
-        assert!(
-            !anchor_raw.trim().is_empty(),
-            "anchor_json should not be empty"
+        assert_eq!(
+            row.get::<Option<String>, _>("source_language"),
+            Some("en".to_string())
         );
-        let anchor: Value = serde_json::from_str(&anchor_raw).expect("anchor_json must be valid");
-        assert!(
-            anchor
-                .get("locator_type")
-                .and_then(|v| v.as_str())
-                .is_some(),
-            "anchor_json missing locator_type"
+        assert_eq!(
+            row.get::<Option<String>, _>("target_language"),
+            Some("zh-CN".to_string())
         );
-        assert!(
-            anchor
-                .get("display_label")
-                .and_then(|v| v.as_str())
-                .is_some(),
-            "anchor_json missing display_label"
-        );
-        assert!(
-            anchor
-                .get("segment_number")
-                .and_then(|v| v.as_i64())
-                .is_some(),
-            "anchor_json missing segment_number"
-        );
-
-        assert_eq!(row.get::<String, _>("translation_status"), "pending");
     }
+}
 
-    assert!(
-        combined_source.contains("Alpha") && combined_source.contains("Beta"),
-        "chunk source_text should include original paragraphs"
-    );
-    let initial_chunk_count = chunk_rows.len() as i64;
-    assert_eq!(
-        file_row.get::<i64, _>("chunk_count"),
-        initial_chunk_count,
-        "file.chunk_count should match actual chunk rows"
-    );
-
-    sqlx::query(
-        r#"
-        UPDATE evidence_files
-        SET
-            translation_status = 'failed',
-            translation_error = 'stale error',
-            source_language = 'en',
-            translation_model = 'old-model',
-            translation_provider = 'old-provider',
-            translated_chunk_count = 7,
-            failed_chunk_count = 1
-        WHERE id = ?1
-        "#,
-    )
-    .bind(&evidence_id)
-    .execute(&pool)
-    .await
-    .expect("mark file stale before reparse");
-
-    let stale_chunk_id = "stale-chunk-for-reparse";
-    sqlx::query(
-        r#"
-        INSERT INTO evidence_file_chunks (
-            id,
-            evidence_id,
-            case_id,
-            chunk_index,
-            page_number,
-            segment_number,
-            chunk_kind,
-            display_label,
-            source_text,
-            char_count,
-            token_estimate,
-            anchor_json,
-            source_text_hash,
-            translation_status
-        )
-        VALUES (?1, ?2, ?3, 999, 0, 999, 'text', 'stale', 'stale chunk', 11, 3, ?4, 'stalehash', 'done')
-        "#,
-    )
-    .bind(stale_chunk_id)
-    .bind(&evidence_id)
-    .bind(&case_id)
-    .bind(serde_json::json!({
-        "locator_type": "segment",
-        "display_label": "stale",
-        "segment_number": 999
-    }).to_string())
-    .execute(&pool)
-    .await
-    .expect("insert stale chunk before reparse");
-
-    let reparse = request_json(
+#[tokio::test]
+async fn missing_provider_source_language_falls_back_to_heuristic() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
         &app,
-        Method::POST,
-        &format!("/api/v1/files/{evidence_id}/parse"),
-        Some(&token),
-        serde_json::json!({}),
+        "translation-source-lang-fallback",
+        "translation-source-lang-fallback@example.com",
     )
     .await;
-    assert_eq!(reparse.0, StatusCode::OK, "reparse trigger should succeed");
-    let reparsed_detail = wait_for_file_parse_done(&app, &token, &evidence_id).await;
-    assert_eq!(reparsed_detail.0, StatusCode::OK);
-    assert_eq!(
-        reparsed_detail.1["data"]["parse_status"]
-            .as_str()
-            .unwrap_or(""),
-        "done",
-        "expected parse_status=done after reparse"
+    let case_id = create_case(&app, &token, "Source Lang Fallback", "heuristic fallback").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "ZH::Alpha".to_string(),
+            source_language: None,
+        }],
     );
 
-    let stale_chunk_count: i64 =
-        sqlx::query("SELECT COUNT(1) AS cnt FROM evidence_file_chunks WHERE id = ?1")
-            .bind(stale_chunk_id)
-            .fetch_one(&pool)
-            .await
-            .expect("count stale chunk")
-            .get("cnt");
+    let evidence_id = upload_text_file(&app, &token, &case_id, "lang.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    let chunk_row = sqlx::query(
+        r#"
+        SELECT source_language
+        FROM evidence_file_chunks
+        WHERE evidence_id = ?1
+        LIMIT 1
+        "#,
+    )
+    .bind(&evidence_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch chunk source language");
     assert_eq!(
-        stale_chunk_count, 0,
-        "stale chunk should be deleted during reparse"
+        chunk_row.get::<Option<String>, _>("source_language"),
+        Some("en".to_string())
     );
 
-    let file_row_after = sqlx::query(
+    let file_row = sqlx::query(
+        r#"
+        SELECT source_language
+        FROM evidence_files
+        WHERE id = ?1
+        LIMIT 1
+        "#,
+    )
+    .bind(&evidence_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch file source language");
+    assert_eq!(
+        file_row.get::<Option<String>, _>("source_language"),
+        Some("en".to_string())
+    );
+}
+
+#[tokio::test]
+async fn parsing_persists_chunk_source_fields() {
+    let (app, _state, _tmp, pool, _provider) = build_test_app_with_disabled_translation().await;
+    let (_user_id, token) =
+        register_user(&app, "chunk-persist", "chunk-persist@example.com").await;
+    let case_id = create_case(&app, &token, "Chunk Persist", "task 2 regression").await;
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "note.txt", "Alpha\n\nBeta\n").await;
+
+    let detail = wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    assert_eq!(detail.0, StatusCode::OK);
+
+    let file_row = sqlx::query(
         r#"
         SELECT
-            translation_status,
-            translation_error,
-            source_language,
-            translation_model,
-            translation_provider,
-            translated_chunk_count,
-            failed_chunk_count,
+            parse_status,
             chunk_count
         FROM evidence_files
         WHERE id = ?1
@@ -339,45 +393,1052 @@ async fn parsing_creates_chunks_for_uploaded_file() {
     .bind(&evidence_id)
     .fetch_one(&pool)
     .await
-    .expect("fetch file row after reparse");
+    .expect("fetch file row");
+
+    assert_eq!(file_row.get::<String, _>("parse_status"), "done");
+
+    let chunk_rows = sqlx::query(
+        r#"
+        SELECT
+            chunk_index,
+            segment_number,
+            display_label,
+            source_text,
+            source_text_hash,
+            anchor_json
+        FROM evidence_file_chunks
+        WHERE evidence_id = ?1
+        ORDER BY chunk_index ASC
+        "#,
+    )
+    .bind(&evidence_id)
+    .fetch_all(&pool)
+    .await
+    .expect("fetch chunks");
+
+    assert_eq!(chunk_rows.len(), 2);
+    assert_eq!(file_row.get::<i64, _>("chunk_count"), chunk_rows.len() as i64);
+
+    for (expected_index, row) in chunk_rows.iter().enumerate() {
+        let source_text = row.get::<String, _>("source_text");
+        assert_eq!(row.get::<i64, _>("chunk_index"), expected_index as i64);
+        assert!(row.get::<i64, _>("segment_number") > 0);
+        assert_eq!(
+            row.get::<String, _>("source_text_hash"),
+            local_source_text_hash(&source_text)
+        );
+
+        let display_label = row.get::<String, _>("display_label");
+        assert!(!display_label.trim().is_empty());
+
+        let anchor_json = row.get::<String, _>("anchor_json");
+        let anchor: Value = serde_json::from_str(&anchor_json).expect("valid anchor json");
+        assert_eq!(
+            anchor["display_label"].as_str().unwrap_or(""),
+            display_label.as_str()
+        );
+        assert_eq!(
+            anchor["segment_number"].as_i64().unwrap_or_default(),
+            row.get::<i64, _>("segment_number")
+        );
+    }
+}
+
+#[tokio::test]
+async fn rapid_reparse_changes_parsed_at_generation_token() {
+    let (app, _state, _tmp, pool, _provider) = build_test_app_with_disabled_translation().await;
+    let (_user_id, token) =
+        register_user(&app, "parsed-at-token", "parsed-at-token@example.com").await;
+    let case_id = create_case(&app, &token, "ParsedAt Token", "rapid reparse").await;
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "parsed-at.txt", "Alpha\n\nBeta\n").await;
+
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    let first_parsed_at = fetch_file_parsed_at(&pool, &evidence_id).await;
+
+    let reparse_one = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/files/{evidence_id}/parse"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(reparse_one.0, StatusCode::OK);
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    let second_parsed_at = fetch_file_parsed_at(&pool, &evidence_id).await;
+
+    let reparse_two = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/files/{evidence_id}/parse"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(reparse_two.0, StatusCode::OK);
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    let third_parsed_at = fetch_file_parsed_at(&pool, &evidence_id).await;
+
+    assert_ne!(first_parsed_at, second_parsed_at);
+    assert_ne!(second_parsed_at, third_parsed_at);
+}
+
+#[tokio::test]
+async fn translation_failures_aggregate_to_partial_or_failed() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) =
+        register_user(&app, "translation-failures", "translation-failures@example.com").await;
+    let case_id = create_case(&app, &token, "Failures", "failure aggregation").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Failure {
+            message: "fake provider failed alpha".to_string(),
+        }],
+    );
+    let partial_file_id =
+        upload_text_file(&app, &token, &case_id, "partial.txt", "Alpha\n\nBeta\n").await;
+    wait_for_file_parse_done(&app, &token, &partial_file_id).await;
+    wait_for_file_translation_status(&pool, &partial_file_id, &["partial"]).await;
+
+    let partial_file = sqlx::query(
+        r#"
+        SELECT
+            translation_status,
+            translation_error,
+            translated_chunk_count,
+            failed_chunk_count
+        FROM evidence_files
+        WHERE id = ?1
+        LIMIT 1
+        "#,
+    )
+    .bind(&partial_file_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch partial file");
+
+    assert_eq!(partial_file.get::<String, _>("translation_status"), "partial");
+    assert_eq!(partial_file.get::<i64, _>("translated_chunk_count"), 1);
+    assert_eq!(partial_file.get::<i64, _>("failed_chunk_count"), 1);
+    assert!(
+        partial_file
+            .get::<Option<String>, _>("translation_error")
+            .unwrap_or_default()
+            .contains("fake provider failed alpha")
+    );
+
+    let partial_failed_chunk = sqlx::query(
+        r#"
+        SELECT
+            translation_status,
+            retry_count,
+            next_retry_at,
+            translation_error
+        FROM evidence_file_chunks
+        WHERE evidence_id = ?1 AND source_text = 'Alpha'
+        LIMIT 1
+        "#,
+    )
+    .bind(&partial_file_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch failed alpha chunk");
 
     assert_eq!(
-        file_row_after.get::<String, _>("translation_status"),
+        partial_failed_chunk.get::<String, _>("translation_status"),
+        "failed"
+    );
+    assert_eq!(partial_failed_chunk.get::<i64, _>("retry_count"), 1);
+    assert!(
+        partial_failed_chunk
+            .get::<Option<String>, _>("next_retry_at")
+            .is_some()
+    );
+    assert!(
+        partial_failed_chunk
+            .get::<Option<String>, _>("translation_error")
+            .unwrap_or_default()
+            .contains("fake provider failed alpha")
+    );
+
+    provider.push_responses(
+        "Gamma",
+        [FakeProviderResponse::Failure {
+            message: "fake provider failed gamma".to_string(),
+        }],
+    );
+    let failed_file_id = upload_text_file(&app, &token, &case_id, "failed.txt", "Gamma\n").await;
+    wait_for_file_parse_done(&app, &token, &failed_file_id).await;
+    wait_for_file_translation_status(&pool, &failed_file_id, &["failed"]).await;
+
+    let failed_file = sqlx::query(
+        r#"
+        SELECT
+            translation_status,
+            translation_error,
+            translated_chunk_count,
+            failed_chunk_count
+        FROM evidence_files
+        WHERE id = ?1
+        LIMIT 1
+        "#,
+    )
+    .bind(&failed_file_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch failed file");
+
+    assert_eq!(failed_file.get::<String, _>("translation_status"), "failed");
+    assert_eq!(failed_file.get::<i64, _>("translated_chunk_count"), 0);
+    assert_eq!(failed_file.get::<i64, _>("failed_chunk_count"), 1);
+    assert!(
+        failed_file
+            .get::<Option<String>, _>("translation_error")
+            .unwrap_or_default()
+            .contains("fake provider failed gamma")
+    );
+}
+
+#[tokio::test]
+async fn pending_or_processing_chunks_keep_file_status_processing() {
+    let notify = Arc::new(Notify::new());
+    let (app, _state, _tmp, pool, provider) =
+        build_test_app_with_fake_translation_concurrency(1).await;
+    let (_user_id, token) =
+        register_user(&app, "translation-mix", "translation-mix@example.com").await;
+    let case_id = create_case(&app, &token, "Status Mix", "status priority").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "ZH::Alpha".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+    provider.push_responses(
+        "Beta",
+        [FakeProviderResponse::Failure {
+            message: "fake provider failed beta".to_string(),
+        }],
+    );
+    provider.push_responses(
+        "Gamma",
+        [FakeProviderResponse::Wait {
+            notify: notify.clone(),
+            next: Box::new(FakeProviderResponse::Success {
+                translated_text: "ZH::Gamma".to_string(),
+                source_language: Some("en".to_string()),
+            }),
+        }],
+    );
+
+    let evidence_id = upload_text_file(
+        &app,
+        &token,
+        &case_id,
+        "mix.txt",
+        "Alpha\n\nBeta\n\nGamma\n",
+    )
+    .await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+
+    let processing_row =
+        wait_for_processing_mixed_file_state(&pool, &evidence_id, 1, 1).await;
+    assert_eq!(
+        processing_row.get::<String, _>("translation_status"),
+        "processing"
+    );
+
+    notify.notify_waiters();
+    wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
+}
+
+#[tokio::test]
+async fn third_retry_backoff_is_preserved() {
+    let (app, state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-third-retry",
+        "translation-third-retry@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Third Retry", "retry tiers").await;
+
+    provider.push_responses(
+        "Gamma",
+        [
+            FakeProviderResponse::Failure {
+                message: "attempt 1".to_string(),
+            },
+            FakeProviderResponse::Failure {
+                message: "attempt 2".to_string(),
+            },
+            FakeProviderResponse::Failure {
+                message: "attempt 3".to_string(),
+            },
+            FakeProviderResponse::Failure {
+                message: "attempt 4".to_string(),
+            },
+        ],
+    );
+
+    let evidence_id = upload_text_file(&app, &token, &case_id, "retry3.txt", "Gamma\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+
+    let first = wait_for_chunk_retry_count(&pool, &evidence_id, "Gamma", 1).await;
+    assert_retry_delay_in_minutes(first.get("next_retry_at"), 0, 2);
+
+    force_failed_chunk_due_now(&pool, &evidence_id).await;
+    translation::run_retry_cycle_once(state.clone())
+        .await
+        .expect("run retry cycle 2");
+    let second = wait_for_chunk_retry_count(&pool, &evidence_id, "Gamma", 2).await;
+    assert_retry_delay_in_minutes(second.get("next_retry_at"), 4, 6);
+
+    force_failed_chunk_due_now(&pool, &evidence_id).await;
+    translation::run_retry_cycle_once(state.clone())
+        .await
+        .expect("run retry cycle 3");
+    let third = wait_for_chunk_retry_count(&pool, &evidence_id, "Gamma", 3).await;
+    assert_retry_delay_in_minutes(third.get("next_retry_at"), 29, 31);
+
+    force_failed_chunk_due_now(&pool, &evidence_id).await;
+    translation::run_retry_cycle_once(state.clone())
+        .await
+        .expect("run retry cycle 4");
+    let fourth = wait_for_chunk_retry_count(&pool, &evidence_id, "Gamma", 4).await;
+    assert_eq!(fourth.get::<Option<String>, _>("next_retry_at"), None);
+}
+
+#[tokio::test]
+async fn successful_chunks_are_not_overwritten_on_retry() {
+    let (app, state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-idempotent",
+        "translation-idempotent@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Retry", "idempotent retry").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "ZH::Alpha::first".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+    provider.push_responses(
+        "Beta",
+        [
+            FakeProviderResponse::Failure {
+                message: "fake provider failed beta".to_string(),
+            },
+            FakeProviderResponse::Success {
+                translated_text: "ZH::Beta::retry".to_string(),
+                source_language: Some("en".to_string()),
+            },
+        ],
+    );
+
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "retry.txt", "Alpha\n\nBeta\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
+
+    let alpha_before = chunk_translation_text(&pool, &evidence_id, "Alpha").await;
+    assert_eq!(alpha_before.as_deref(), Some("ZH::Alpha::first"));
+    assert_eq!(provider.call_count("Alpha"), 1);
+    assert_eq!(provider.call_count("Beta"), 1);
+
+    sqlx::query(
+        "UPDATE evidence_file_chunks SET next_retry_at = CURRENT_TIMESTAMP WHERE evidence_id = ?1 AND translation_status = 'failed'",
+    )
+    .bind(&evidence_id)
+    .execute(&pool)
+    .await
+    .expect("make failed chunk retryable now");
+
+    translation::run_retry_cycle_once(state.clone())
+        .await
+        .expect("run retry cycle");
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    let alpha_after = chunk_translation_text(&pool, &evidence_id, "Alpha").await;
+    let beta_after = chunk_translation_text(&pool, &evidence_id, "Beta").await;
+
+    assert_eq!(alpha_after.as_deref(), Some("ZH::Alpha::first"));
+    assert_eq!(beta_after.as_deref(), Some("ZH::Beta::retry"));
+    assert_eq!(provider.call_count("Alpha"), 1);
+    assert_eq!(provider.call_count("Beta"), 2);
+}
+
+#[tokio::test]
+async fn stale_attempt_results_do_not_overwrite_new_attempt() {
+    let notify = Arc::new(Notify::new());
+    let (app, state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) =
+        register_user(&app, "translation-cas", "translation-cas@example.com").await;
+    let case_id = create_case(&app, &token, "Attempt CAS", "stale attempt cas").await;
+
+    provider.push_responses(
+        "Alpha",
+        [
+            FakeProviderResponse::Wait {
+                notify: notify.clone(),
+                next: Box::new(FakeProviderResponse::Success {
+                    translated_text: "ZH::Alpha::stale".to_string(),
+                    source_language: Some("en".to_string()),
+                }),
+            },
+            FakeProviderResponse::Success {
+                translated_text: "ZH::Alpha::fresh".to_string(),
+                source_language: Some("en".to_string()),
+            },
+        ],
+    );
+
+    let evidence_id = upload_text_file(&app, &token, &case_id, "cas.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_chunk_status(&pool, &evidence_id, "Alpha", "processing").await;
+
+    mark_chunk_processing_stale(&pool, &evidence_id, "Alpha").await;
+    translation::run_retry_cycle_once(state.clone())
+        .await
+        .expect("run stale reset cycle");
+    let stale_reset_row = wait_for_chunk_retry_count(&pool, &evidence_id, "Alpha", 1).await;
+    assert_eq!(
+        stale_reset_row.get::<String, _>("translation_status"),
         "pending"
     );
-    assert_eq!(
-        file_row_after.get::<Option<String>, _>("translation_error"),
-        None
-    );
-    assert_eq!(
-        file_row_after.get::<Option<String>, _>("source_language"),
-        None
-    );
-    assert_eq!(
-        file_row_after.get::<Option<String>, _>("translation_model"),
-        None
-    );
-    assert_eq!(
-        file_row_after.get::<Option<String>, _>("translation_provider"),
-        None
-    );
-    assert_eq!(file_row_after.get::<i64, _>("translated_chunk_count"), 0);
-    assert_eq!(file_row_after.get::<i64, _>("failed_chunk_count"), 0);
 
-    let chunk_count_after: i64 =
-        sqlx::query("SELECT COUNT(1) AS cnt FROM evidence_file_chunks WHERE evidence_id = ?1")
-            .bind(&evidence_id)
-            .fetch_one(&pool)
+    force_failed_or_pending_chunk_due_now(&pool, &evidence_id).await;
+    translation::run_retry_cycle_once(state.clone())
+        .await
+        .expect("run replacement attempt cycle");
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    notify.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let translated = chunk_translation_text(&pool, &evidence_id, "Alpha").await;
+    assert_eq!(translated.as_deref(), Some("ZH::Alpha::fresh"));
+    assert_eq!(provider.call_count("Alpha"), 2);
+}
+
+#[tokio::test]
+async fn stale_processing_consumes_retry_budget() {
+    let notify = Arc::new(Notify::new());
+    let (app, state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-stale-budget",
+        "translation-stale-budget@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Stale Budget", "stale retry budget").await;
+
+    provider.push_responses(
+        "Alpha",
+        [
+            FakeProviderResponse::Wait {
+                notify: notify.clone(),
+                next: Box::new(FakeProviderResponse::Success {
+                    translated_text: "ignored-1".to_string(),
+                    source_language: Some("en".to_string()),
+                }),
+            },
+            FakeProviderResponse::Wait {
+                notify: notify.clone(),
+                next: Box::new(FakeProviderResponse::Success {
+                    translated_text: "ignored-2".to_string(),
+                    source_language: Some("en".to_string()),
+                }),
+            },
+            FakeProviderResponse::Wait {
+                notify: notify.clone(),
+                next: Box::new(FakeProviderResponse::Success {
+                    translated_text: "ignored-3".to_string(),
+                    source_language: Some("en".to_string()),
+                }),
+            },
+            FakeProviderResponse::Wait {
+                notify: notify.clone(),
+                next: Box::new(FakeProviderResponse::Success {
+                    translated_text: "ignored-4".to_string(),
+                    source_language: Some("en".to_string()),
+                }),
+            },
+        ],
+    );
+
+    let evidence_id = upload_text_file(&app, &token, &case_id, "stale.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+
+    for expected_retry_count in 1..=3 {
+        wait_for_chunk_status(&pool, &evidence_id, "Alpha", "processing").await;
+        mark_chunk_processing_stale(&pool, &evidence_id, "Alpha").await;
+        translation::run_retry_cycle_once(state.clone())
             .await
-            .expect("count chunks after reparse")
-            .get("cnt");
+            .expect("run stale budget cycle");
+
+        let row = wait_for_chunk_retry_count(&pool, &evidence_id, "Alpha", expected_retry_count)
+            .await;
+        assert_eq!(row.get::<String, _>("translation_status"), "pending");
+        assert!(
+            row.get::<Option<String>, _>("next_retry_at").is_some(),
+            "retry {expected_retry_count} should schedule another retry"
+        );
+
+        force_failed_or_pending_chunk_due_now(&pool, &evidence_id).await;
+        translation::run_retry_cycle_once(state.clone())
+            .await
+            .expect("run claim next stale attempt");
+    }
+
+    wait_for_chunk_status(&pool, &evidence_id, "Alpha", "processing").await;
+    mark_chunk_processing_stale(&pool, &evidence_id, "Alpha").await;
+    translation::run_retry_cycle_once(state.clone())
+        .await
+        .expect("run terminal stale budget cycle");
+
+    let terminal = wait_for_chunk_retry_count(&pool, &evidence_id, "Alpha", 4).await;
+    assert_eq!(terminal.get::<String, _>("translation_status"), "failed");
+    assert_eq!(terminal.get::<Option<String>, _>("next_retry_at"), None);
+
+    translation::run_retry_cycle_once(state.clone())
+        .await
+        .expect("run extra idle retry cycle");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let still_terminal = fetch_chunk_state(&pool, &evidence_id, "Alpha").await;
+    assert_eq!(still_terminal.get::<String, _>("translation_status"), "failed");
+    assert_eq!(still_terminal.get::<i64, _>("retry_count"), 4);
+
+    notify.notify_waiters();
+}
+
+#[tokio::test]
+async fn retry_does_not_drift_locked_provider_or_model() {
+    let (app, state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) =
+        register_user(&app, "translation-lock", "translation-lock@example.com").await;
+    let case_id = create_case(&app, &token, "Provider Lock", "provider/model lock").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "ZH::Alpha".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+    provider.push_responses(
+        "Beta",
+        [FakeProviderResponse::Failure {
+            message: "beta first fail".to_string(),
+        }],
+    );
+
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "lock.txt", "Alpha\n\nBeta\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
+
+    force_failed_chunk_due_now(&pool, &evidence_id).await;
+
+    let drift_provider = FakeTranslationProvider::new("fake-drift", Some("fake-legal-v2"));
+    let drift_state = AppState::new_with_translation_provider(
+        state.config.clone(),
+        pool.clone(),
+        TranslationConfig {
+            provider: "fake-drift".to_string(),
+            base_url: None,
+            api_key: None,
+            model: Some("fake-legal-v2".to_string()),
+            target_language: "zh-CN".to_string(),
+            max_concurrency: 1,
+            chunk_size_limit: 2_000,
+        },
+        Arc::new(drift_provider),
+    );
+
+    translation::run_retry_cycle_once(drift_state)
+        .await
+        .expect("run retry cycle with drifted provider");
+    wait_for_file_translation_error(&pool, &evidence_id, "provider/model mismatch").await;
+
+    let file_row = sqlx::query(
+        r#"
+        SELECT
+            translation_status,
+            translation_error,
+            translation_provider,
+            translation_model
+        FROM evidence_files
+        WHERE id = ?1
+        LIMIT 1
+        "#,
+    )
+    .bind(&evidence_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch locked file row");
+
     assert_eq!(
-        chunk_count_after, initial_chunk_count,
-        "reparse should replace chunks, not append extra chunks"
+        file_row.get::<Option<String>, _>("translation_provider"),
+        Some("fake".to_string())
     );
     assert_eq!(
-        file_row_after.get::<i64, _>("chunk_count"),
-        chunk_count_after,
-        "file.chunk_count should match chunks after reparse"
+        file_row.get::<Option<String>, _>("translation_model"),
+        Some("fake-legal-v1".to_string())
     );
+    assert!(
+        file_row
+            .get::<Option<String>, _>("translation_error")
+            .unwrap_or_default()
+            .contains("provider/model mismatch")
+    );
+    assert_eq!(file_row.get::<String, _>("translation_status"), "partial");
+
+    let failed_chunk = sqlx::query(
+        r#"
+        SELECT
+            translation_status,
+            next_retry_at,
+            translation_error
+        FROM evidence_file_chunks
+        WHERE evidence_id = ?1 AND source_text = 'Beta'
+        LIMIT 1
+        "#,
+    )
+    .bind(&evidence_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch locked failed chunk");
+
+    assert_eq!(failed_chunk.get::<String, _>("translation_status"), "failed");
+    assert_eq!(failed_chunk.get::<Option<String>, _>("next_retry_at"), None);
+    assert!(
+        failed_chunk
+            .get::<Option<String>, _>("translation_error")
+            .unwrap_or_default()
+            .contains("provider/model mismatch")
+    );
+}
+
+async fn build_test_app_with_fake_translation(
+) -> (axum::Router, AppState, TempDir, SqlitePool, FakeTranslationProvider) {
+    build_test_app_with_named_translation(
+        FakeTranslationProvider::new("fake", Some("fake-legal-v1")),
+        TranslationConfig {
+            provider: "fake".to_string(),
+            base_url: None,
+            api_key: None,
+            model: Some("fake-legal-v1".to_string()),
+            target_language: "zh-CN".to_string(),
+            max_concurrency: 1,
+            chunk_size_limit: 2_000,
+        },
+    )
+    .await
+}
+
+async fn build_test_app_with_fake_translation_concurrency(
+    max_concurrency: u16,
+) -> (axum::Router, AppState, TempDir, SqlitePool, FakeTranslationProvider) {
+    build_test_app_with_named_translation(
+        FakeTranslationProvider::new("fake", Some("fake-legal-v1")),
+        TranslationConfig {
+            provider: "fake".to_string(),
+            base_url: None,
+            api_key: None,
+            model: Some("fake-legal-v1".to_string()),
+            target_language: "zh-CN".to_string(),
+            max_concurrency,
+            chunk_size_limit: 2_000,
+        },
+    )
+    .await
+}
+
+async fn build_test_app_with_disabled_translation(
+) -> (axum::Router, AppState, TempDir, SqlitePool, FakeTranslationProvider) {
+    build_test_app_with_named_translation(
+        FakeTranslationProvider::new("disabled", None),
+        TranslationConfig {
+            provider: "disabled".to_string(),
+            base_url: None,
+            api_key: None,
+            model: None,
+            target_language: "zh-CN".to_string(),
+            max_concurrency: 1,
+            chunk_size_limit: 2_000,
+        },
+    )
+    .await
+}
+
+async fn build_test_app_with_named_translation(
+    provider: FakeTranslationProvider,
+    translation: TranslationConfig,
+) -> (axum::Router, AppState, TempDir, SqlitePool, FakeTranslationProvider) {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite memory");
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .expect("pragma foreign_keys");
+
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate");
+
+    let tmp = TempDir::new().expect("tempdir");
+    let storage_path = tmp.path().join("storage");
+    let temp_path = storage_path.join("temp");
+    let tessdata_dir = tmp.path().join("tessdata");
+
+    tokio::fs::create_dir_all(&storage_path)
+        .await
+        .expect("create storage");
+    tokio::fs::create_dir_all(&temp_path)
+        .await
+        .expect("create temp");
+    tokio::fs::create_dir_all(&tessdata_dir)
+        .await
+        .expect("create tessdata");
+
+    let cfg = AppConfig {
+        app_env: AppEnv::Test,
+        server_host: "127.0.0.1".to_string(),
+        server_port: 0,
+        database_url: "sqlite::memory:".to_string(),
+        cors_origins: CorsOrigins::Any,
+        force_https: false,
+        trust_proxy_headers: false,
+        jwt_secret: "test-secret-please-change-32-chars-min".to_string(),
+        access_token_expire_minutes: 60,
+        refresh_token_expire_days: 7,
+        storage_path: storage_path.to_string_lossy().to_string(),
+        max_file_size: 10 * 1024 * 1024,
+        allowed_file_types: vec![
+            "txt".to_string(),
+            "json".to_string(),
+            "xlsx".to_string(),
+            "docx".to_string(),
+            "doc".to_string(),
+        ],
+        temp_path: temp_path.to_string_lossy().to_string(),
+        tessdata_dir: tessdata_dir.to_string_lossy().to_string(),
+        whisper_model_path: tmp.path().join("whisper.bin").to_string_lossy().to_string(),
+        asr_language: "zh".to_string(),
+        asr_threads: 1,
+    };
+
+    let state = AppState::new_with_translation_provider(
+        cfg,
+        pool,
+        translation,
+        Arc::new(provider.clone()),
+    );
+    let pool = state.pool.clone();
+    let app = router(state.clone());
+    (app, state, tmp, pool, provider)
+}
+
+async fn wait_for_file_translation_status(
+    pool: &SqlitePool,
+    file_id: &str,
+    expected_statuses: &[&str],
+) -> Value {
+    for _ in 0..100 {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                translation_status,
+                translation_error,
+                translated_chunk_count,
+                failed_chunk_count
+            FROM evidence_files
+            WHERE id = ?1
+            LIMIT 1
+            "#,
+        )
+        .bind(file_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch file translation row");
+
+        let status = row.get::<String, _>("translation_status");
+        if expected_statuses.iter().any(|expected| *expected == status) {
+            return serde_json::json!({
+                "translation_status": status,
+                "translation_error": row.get::<Option<String>, _>("translation_error"),
+                "translated_chunk_count": row.get::<i64, _>("translated_chunk_count"),
+                "failed_chunk_count": row.get::<i64, _>("failed_chunk_count"),
+            });
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            translation_status,
+            translation_error,
+            translated_chunk_count,
+            failed_chunk_count
+        FROM evidence_files
+        WHERE id = ?1
+        LIMIT 1
+        "#,
+    )
+    .bind(file_id)
+    .fetch_one(pool)
+    .await
+    .expect("fetch final file translation row");
+
+    panic!(
+        "translation_status for {file_id} did not reach {:?}, got {}",
+        expected_statuses,
+        row.get::<String, _>("translation_status")
+    );
+}
+
+async fn chunk_translation_text(
+    pool: &SqlitePool,
+    evidence_id: &str,
+    source_text: &str,
+) -> Option<String> {
+    sqlx::query(
+        "SELECT translated_text FROM evidence_file_chunks WHERE evidence_id = ?1 AND source_text = ?2 LIMIT 1",
+    )
+    .bind(evidence_id)
+    .bind(source_text)
+    .fetch_one(pool)
+    .await
+    .expect("fetch chunk translated text")
+    .get::<Option<String>, _>("translated_text")
+}
+
+async fn wait_for_processing_mixed_file_state(
+    pool: &SqlitePool,
+    evidence_id: &str,
+    expected_done: i64,
+    expected_failed: i64,
+) -> sqlx::sqlite::SqliteRow {
+    for _ in 0..100 {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                f.translation_status AS translation_status,
+                SUM(CASE WHEN c.translation_status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+                SUM(CASE WHEN c.translation_status = 'processing' THEN 1 ELSE 0 END) AS processing_count,
+                SUM(CASE WHEN c.translation_status = 'done' THEN 1 ELSE 0 END) AS done_count,
+                SUM(CASE WHEN c.translation_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+            FROM evidence_files f
+            JOIN evidence_file_chunks c ON c.evidence_id = f.id
+            WHERE f.id = ?1
+            GROUP BY f.id
+            LIMIT 1
+            "#,
+        )
+        .bind(evidence_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch mixed processing row");
+
+        let done_count = row.get::<i64, _>("done_count");
+        let failed_count = row.get::<i64, _>("failed_count");
+        let pending_count = row.get::<i64, _>("pending_count");
+        let processing_count = row.get::<i64, _>("processing_count");
+        if done_count == expected_done
+            && failed_count == expected_failed
+            && (pending_count > 0 || processing_count > 0)
+        {
+            return row;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("file {evidence_id} did not reach mixed processing state");
+}
+
+async fn force_failed_chunk_due_now(pool: &SqlitePool, evidence_id: &str) {
+    sqlx::query(
+        "UPDATE evidence_file_chunks SET next_retry_at = CURRENT_TIMESTAMP WHERE evidence_id = ?1 AND translation_status = 'failed'",
+    )
+    .bind(evidence_id)
+    .execute(pool)
+    .await
+    .expect("force failed chunk due now");
+}
+
+async fn wait_for_chunk_retry_count(
+    pool: &SqlitePool,
+    evidence_id: &str,
+    source_text: &str,
+    expected_retry_count: i64,
+) -> sqlx::sqlite::SqliteRow {
+    for _ in 0..100 {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                translation_status,
+                retry_count,
+                next_retry_at
+            FROM evidence_file_chunks
+            WHERE evidence_id = ?1 AND source_text = ?2
+            LIMIT 1
+            "#,
+        )
+        .bind(evidence_id)
+        .bind(source_text)
+        .fetch_one(pool)
+        .await
+        .expect("fetch retry row");
+
+        if row.get::<i64, _>("retry_count") == expected_retry_count {
+            return row;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!(
+        "chunk {source_text} in file {evidence_id} did not reach retry_count={expected_retry_count}"
+    );
+}
+
+fn assert_retry_delay_in_minutes(next_retry_at: Option<String>, min_minutes: i64, max_minutes: i64) {
+    let next_retry_at = next_retry_at.expect("next_retry_at should exist");
+    let parsed = chrono::NaiveDateTime::parse_from_str(&next_retry_at, "%Y-%m-%d %H:%M:%S")
+        .expect("parse next_retry_at");
+    let now = chrono::Utc::now().naive_utc();
+    let delay_minutes = (parsed - now).num_minutes();
+    assert!(
+        (min_minutes..=max_minutes).contains(&delay_minutes),
+        "expected retry delay between {min_minutes} and {max_minutes} minutes, got {delay_minutes} from {next_retry_at}"
+    );
+}
+
+fn local_source_text_hash(text: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+async fn wait_for_file_translation_error(pool: &SqlitePool, evidence_id: &str, needle: &str) {
+    for _ in 0..100 {
+        let error = sqlx::query(
+            "SELECT translation_error FROM evidence_files WHERE id = ?1 LIMIT 1",
+        )
+        .bind(evidence_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch translation_error")
+        .get::<Option<String>, _>("translation_error")
+        .unwrap_or_default();
+
+        if error.contains(needle) {
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("file {evidence_id} did not reach translation_error containing {needle}");
+}
+
+async fn fetch_file_parsed_at(pool: &SqlitePool, evidence_id: &str) -> String {
+    sqlx::query("SELECT parsed_at FROM evidence_files WHERE id = ?1 LIMIT 1")
+        .bind(evidence_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch parsed_at")
+        .get::<String, _>("parsed_at")
+}
+
+async fn wait_for_chunk_status(
+    pool: &SqlitePool,
+    evidence_id: &str,
+    source_text: &str,
+    expected_status: &str,
+) -> sqlx::sqlite::SqliteRow {
+    for _ in 0..100 {
+        let row = fetch_chunk_state(pool, evidence_id, source_text).await;
+        if row.get::<String, _>("translation_status") == expected_status {
+            return row;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!(
+        "chunk {source_text} in file {evidence_id} did not reach status={expected_status}"
+    );
+}
+
+async fn fetch_chunk_state(
+    pool: &SqlitePool,
+    evidence_id: &str,
+    source_text: &str,
+) -> sqlx::sqlite::SqliteRow {
+    sqlx::query(
+        r#"
+        SELECT
+            translation_status,
+            retry_count,
+            next_retry_at,
+            translated_text,
+            last_attempt_at
+        FROM evidence_file_chunks
+        WHERE evidence_id = ?1 AND source_text = ?2
+        LIMIT 1
+        "#,
+    )
+    .bind(evidence_id)
+    .bind(source_text)
+    .fetch_one(pool)
+    .await
+    .expect("fetch chunk state")
+}
+
+async fn mark_chunk_processing_stale(pool: &SqlitePool, evidence_id: &str, source_text: &str) {
+    sqlx::query(
+        r#"
+        UPDATE evidence_file_chunks
+        SET last_attempt_at = '2000-01-01 00:00:00'
+        WHERE evidence_id = ?1 AND source_text = ?2
+        "#,
+    )
+    .bind(evidence_id)
+    .bind(source_text)
+    .execute(pool)
+    .await
+    .expect("mark chunk processing stale");
+}
+
+async fn force_failed_or_pending_chunk_due_now(pool: &SqlitePool, evidence_id: &str) {
+    sqlx::query(
+        r#"
+        UPDATE evidence_file_chunks
+        SET next_retry_at = CURRENT_TIMESTAMP
+        WHERE evidence_id = ?1
+          AND translation_status IN ('failed', 'pending')
+        "#,
+    )
+    .bind(evidence_id)
+    .execute(pool)
+    .await
+    .expect("force chunk due now");
 }

@@ -3371,6 +3371,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
+ "async-trait",
  "axum 0.7.9",
  "base64 0.22.1",
  "calamine",
@@ -3385,6 +3386,7 @@ dependencies = [
  "printpdf",
  "quick-xml",
  "rand_core 0.6.4",
+ "reqwest 0.13.2",
  "resvg",
  "rust_xlsxwriter",
  "serde",

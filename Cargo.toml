@@ -13,6 +13,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1"
+async-trait = "0.1"
 argon2 = "0.5"
 axum = { version = "0.7", features = ["macros", "multipart"] }
 chrono = { version = "0.4", features = ["serde"] }

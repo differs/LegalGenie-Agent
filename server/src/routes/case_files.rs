@@ -305,12 +305,7 @@ async fn upload_case_file(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    crate::parser::enqueue_parse(
-        state.pool.clone(),
-        state.config.clone(),
-        file_id.to_string(),
-        true,
-    )
+    crate::parser::enqueue_parse(state.clone(), file_id.to_string(), true)
     .await
     .map_err(|e| AppError::internal(format!("enqueue parse failed: {e}")))?;
 

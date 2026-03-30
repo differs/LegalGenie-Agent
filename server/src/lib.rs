@@ -10,6 +10,7 @@ mod parser;
 mod rate_limit;
 mod routes;
 mod state;
+pub mod translation;
 
 pub use crate::config::{AppConfig, AppEnv, CorsOrigins, TranslationConfig};
 pub use crate::db::create_pool;
