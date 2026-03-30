@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use test_support::{
-    create_case, register_user, request_json, upload_text_file, wait_for_file_parse_done,
+    create_case, register_user, request_json, request_multipart_text, upload_text_file,
+    wait_for_file_parse_done,
 };
 use tokio::sync::Notify;
 
@@ -773,6 +774,442 @@ async fn successful_chunks_are_not_overwritten_on_retry() {
     assert_eq!(beta_after.as_deref(), Some("ZH::Beta::retry"));
     assert_eq!(provider.call_count("Alpha"), 1);
     assert_eq!(provider.call_count("Beta"), 2);
+}
+
+#[tokio::test]
+async fn file_detail_and_chunk_endpoints_expose_translation_state() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-file-detail",
+        "translation-file-detail@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "File Detail", "task 4 file detail").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "ZH::Alpha".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+    provider.push_responses(
+        "Beta",
+        [FakeProviderResponse::Success {
+            translated_text: "ZH::Beta".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+
+    let upload = request_multipart_text(
+        &app,
+        &format!("/api/v1/cases/{case_id}/files"),
+        &token,
+        "detail.txt",
+        "Alpha\n\nBeta\n",
+    )
+    .await;
+    assert_eq!(upload.0, StatusCode::OK);
+
+    let upload_data = &upload.1["data"];
+    let evidence_id = upload_data["id"].as_str().expect("upload file id").to_string();
+    assert_eq!(upload_data["translation_status"].as_str(), Some("pending"));
+    assert!(upload_data["translation_error"].is_null());
+    assert!(upload_data["source_language"].is_null());
+    assert!(upload_data["target_language"].is_null());
+    assert_eq!(upload_data["chunk_count"].as_i64(), Some(0));
+    assert_eq!(upload_data["translated_chunk_count"].as_i64(), Some(0));
+    assert_eq!(upload_data["failed_chunk_count"].as_i64(), Some(0));
+    assert!(upload_data["translation_provider"].is_null());
+    assert!(upload_data["translation_model"].is_null());
+    assert_eq!(upload_data["translation_incomplete"].as_bool(), Some(true));
+
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    let detail = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{evidence_id}"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(detail.0, StatusCode::OK);
+    let detail_data = &detail.1["data"];
+    assert_eq!(detail_data["translation_status"].as_str(), Some("done"));
+    assert!(detail_data["translation_error"].is_null());
+    assert_eq!(detail_data["source_language"].as_str(), Some("en"));
+    assert_eq!(detail_data["target_language"].as_str(), Some("zh-CN"));
+    assert_eq!(detail_data["chunk_count"].as_i64(), Some(2));
+    assert_eq!(detail_data["translated_chunk_count"].as_i64(), Some(2));
+    assert_eq!(detail_data["failed_chunk_count"].as_i64(), Some(0));
+    assert_eq!(detail_data["translation_provider"].as_str(), Some("fake"));
+    assert_eq!(
+        detail_data["translation_model"].as_str(),
+        Some("fake-legal-v1")
+    );
+    assert_eq!(detail_data["translation_incomplete"].as_bool(), Some(false));
+
+    let translation = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{evidence_id}/translation"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(translation.0, StatusCode::OK);
+    assert_eq!(
+        translation.1["data"]["translation_status"].as_str(),
+        Some("done")
+    );
+    assert_eq!(translation.1["data"]["chunk_count"].as_i64(), Some(2));
+    assert_eq!(
+        translation.1["data"]["translation_incomplete"].as_bool(),
+        Some(false)
+    );
+
+    let source_chunks = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{evidence_id}/chunks?page=1&page_size=1&view_mode=source"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(source_chunks.0, StatusCode::OK);
+    assert_eq!(source_chunks.1["data"]["total"].as_i64(), Some(2));
+    assert_eq!(source_chunks.1["data"]["page"].as_i64(), Some(1));
+    assert_eq!(source_chunks.1["data"]["page_size"].as_i64(), Some(1));
+    assert_eq!(source_chunks.1["data"]["view_mode"].as_str(), Some("source"));
+    let first_chunk = &source_chunks.1["data"]["items"][0];
+    assert_eq!(first_chunk["chunk_index"].as_i64(), Some(0));
+    assert_eq!(first_chunk["source_text"].as_str(), Some("Alpha"));
+    assert!(first_chunk["translated_text"].is_null());
+    assert_eq!(first_chunk["translation_status"].as_str(), Some("done"));
+    assert_eq!(
+        first_chunk["anchor_json"]["display_label"].as_str(),
+        first_chunk["display_label"].as_str()
+    );
+
+    let translated_chunks = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{evidence_id}/chunks?page=2&page_size=1&view_mode=zh"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(translated_chunks.0, StatusCode::OK);
+    assert_eq!(translated_chunks.1["data"]["view_mode"].as_str(), Some("zh"));
+    let second_chunk = &translated_chunks.1["data"]["items"][0];
+    assert_eq!(second_chunk["chunk_index"].as_i64(), Some(1));
+    assert!(second_chunk["source_text"].is_null());
+    assert_eq!(second_chunk["translated_text"].as_str(), Some("ZH::Beta"));
+
+    let bilingual_chunks = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{evidence_id}/chunks?view_mode=bilingual"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(bilingual_chunks.0, StatusCode::OK);
+    assert_eq!(bilingual_chunks.1["data"]["items"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        bilingual_chunks.1["data"]["items"][0]["source_text"].as_str(),
+        Some("Alpha")
+    );
+    assert_eq!(
+        bilingual_chunks.1["data"]["items"][0]["translated_text"].as_str(),
+        Some("ZH::Alpha")
+    );
+
+    let case_files = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/files"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(case_files.0, StatusCode::OK);
+    let listed = &case_files.1["data"]["files"][0];
+    assert_eq!(listed["id"].as_str(), Some(evidence_id.as_str()));
+    assert_eq!(listed["translation_status"].as_str(), Some("done"));
+    assert_eq!(listed["chunk_count"].as_i64(), Some(2));
+    assert_eq!(listed["translated_chunk_count"].as_i64(), Some(2));
+    assert_eq!(listed["failed_chunk_count"].as_i64(), Some(0));
+    assert_eq!(listed["translation_incomplete"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn chunks_endpoint_returns_409_when_parse_is_incomplete() {
+    let (app, _state, _tmp, pool, _provider) = build_test_app_with_disabled_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-parse-incomplete",
+        "translation-parse-incomplete@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Parse Incomplete", "chunks guard").await;
+    let evidence_id = upload_text_file(&app, &token, &case_id, "pending.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+
+    sqlx::query(
+        r#"
+        UPDATE evidence_files
+        SET
+            parse_status = 'processing',
+            parsed_text = NULL,
+            page_count = NULL,
+            duration = NULL,
+            parsed_at = NULL,
+            chunk_count = 0
+        WHERE id = ?1
+        "#,
+    )
+    .bind(&evidence_id)
+    .execute(&pool)
+    .await
+    .expect("force parse incomplete state");
+    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
+        .bind(&evidence_id)
+        .execute(&pool)
+        .await
+        .expect("delete parsed chunks");
+
+    let chunks = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{evidence_id}/chunks"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(chunks.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn retry_selected_requires_chunk_ids() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-retry-selected",
+        "translation-retry-selected@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Retry Selected", "chunk ids required").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Failure {
+            message: "alpha fail".to_string(),
+        }],
+    );
+
+    let evidence_id = upload_text_file(&app, &token, &case_id, "retry-selected.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["failed", "partial"]).await;
+
+    let retry = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/files/{evidence_id}/translate/retry"),
+        Some(&token),
+        serde_json::json!({
+            "scope": "selected"
+        }),
+    )
+    .await;
+    assert_eq!(retry.0, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn retry_all_and_selected_skip_done_chunks_without_overwriting_text() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-retry-skip-done",
+        "translation-retry-skip-done@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Retry Skip Done", "retry skip done").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "ZH::Alpha::first".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+    provider.push_responses(
+        "Beta",
+        [
+            FakeProviderResponse::Failure {
+                message: "beta first fail".to_string(),
+            },
+            FakeProviderResponse::Success {
+                translated_text: "ZH::Beta::retry".to_string(),
+                source_language: Some("en".to_string()),
+            },
+        ],
+    );
+
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "retry-api.txt", "Alpha\n\nBeta\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
+
+    let chunk_rows = sqlx::query(
+        r#"
+        SELECT id, source_text, translation_status
+        FROM evidence_file_chunks
+        WHERE evidence_id = ?1
+        ORDER BY chunk_index ASC
+        "#,
+    )
+    .bind(&evidence_id)
+    .fetch_all(&pool)
+    .await
+    .expect("fetch retry-api chunks");
+
+    let alpha_id = chunk_rows[0].get::<String, _>("id");
+    let beta_id = chunk_rows[1].get::<String, _>("id");
+    assert_eq!(
+        chunk_rows[0].get::<String, _>("translation_status"),
+        "done"
+    );
+    assert_eq!(
+        chunk_rows[1].get::<String, _>("translation_status"),
+        "failed"
+    );
+
+    let retry_all = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/files/{evidence_id}/translate/retry"),
+        Some(&token),
+        serde_json::json!({
+            "scope": "all"
+        }),
+    )
+    .await;
+    assert_eq!(retry_all.0, StatusCode::OK);
+    assert_eq!(retry_all.1["data"]["retried_count"].as_i64(), Some(1));
+    assert_eq!(retry_all.1["data"]["skipped_count"].as_i64(), Some(1));
+    assert_eq!(
+        retry_all.1["data"]["skipped_chunk_ids"][0].as_str(),
+        Some(alpha_id.as_str())
+    );
+
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+    assert_eq!(
+        chunk_translation_text(&pool, &evidence_id, "Alpha").await.as_deref(),
+        Some("ZH::Alpha::first")
+    );
+    assert_eq!(
+        chunk_translation_text(&pool, &evidence_id, "Beta").await.as_deref(),
+        Some("ZH::Beta::retry")
+    );
+    assert_eq!(provider.call_count("Alpha"), 1);
+    assert_eq!(provider.call_count("Beta"), 2);
+
+    let retry_selected = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/files/{evidence_id}/translate/retry"),
+        Some(&token),
+        serde_json::json!({
+            "scope": "selected",
+            "chunk_ids": [alpha_id, beta_id]
+        }),
+    )
+    .await;
+    assert_eq!(retry_selected.0, StatusCode::OK);
+    assert_eq!(retry_selected.1["data"]["retried_count"].as_i64(), Some(0));
+    assert_eq!(retry_selected.1["data"]["skipped_count"].as_i64(), Some(2));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        chunk_translation_text(&pool, &evidence_id, "Alpha").await.as_deref(),
+        Some("ZH::Alpha::first")
+    );
+    assert_eq!(
+        chunk_translation_text(&pool, &evidence_id, "Beta").await.as_deref(),
+        Some("ZH::Beta::retry")
+    );
+    assert_eq!(provider.call_count("Alpha"), 1);
+    assert_eq!(provider.call_count("Beta"), 2);
+}
+
+#[tokio::test]
+async fn retry_skips_processing_chunk_without_resetting_active_attempt() {
+    let notify = Arc::new(Notify::new());
+    let (app, _state, _tmp, pool, provider) =
+        build_test_app_with_fake_translation_concurrency(1).await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-retry-skip-processing",
+        "translation-retry-skip-processing@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Retry Skip Processing", "retry processing").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Wait {
+            notify: notify.clone(),
+            next: Box::new(FakeProviderResponse::Success {
+                translated_text: "ZH::Alpha::processing".to_string(),
+                source_language: Some("en".to_string()),
+            }),
+        }],
+    );
+
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "retry-processing.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+
+    let processing_before = wait_for_chunk_status(&pool, &evidence_id, "Alpha", "processing").await;
+    let last_attempt_before = processing_before.get::<Option<String>, _>("last_attempt_at");
+    assert!(last_attempt_before.is_some());
+
+    let retry = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/files/{evidence_id}/translate/retry"),
+        Some(&token),
+        serde_json::json!({
+            "scope": "all"
+        }),
+    )
+    .await;
+    assert_eq!(retry.0, StatusCode::OK);
+    assert_eq!(retry.1["data"]["retried_count"].as_i64(), Some(0));
+    assert_eq!(retry.1["data"]["skipped_count"].as_i64(), Some(1));
+
+    let processing_after = fetch_chunk_state(&pool, &evidence_id, "Alpha").await;
+    assert_eq!(
+        processing_after.get::<String, _>("translation_status"),
+        "processing"
+    );
+    assert_eq!(
+        processing_after.get::<Option<String>, _>("last_attempt_at"),
+        last_attempt_before
+    );
+    assert_eq!(processing_after.get::<i64, _>("retry_count"), 0);
+
+    notify.notify_waiters();
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+    assert_eq!(
+        chunk_translation_text(&pool, &evidence_id, "Alpha").await.as_deref(),
+        Some("ZH::Alpha::processing")
+    );
+    assert_eq!(provider.call_count("Alpha"), 1);
 }
 
 #[tokio::test]

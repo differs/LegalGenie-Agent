@@ -51,6 +51,8 @@ struct EvidenceFileSummary {
     parse_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     parse_error: Option<String>,
+    #[serde(flatten)]
+    translation: EvidenceFileTranslationSummary,
     created_at: String,
 }
 
@@ -79,7 +81,23 @@ struct EvidenceFileDetail {
     page_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration: Option<i64>,
+    #[serde(flatten)]
+    translation: EvidenceFileTranslationSummary,
     created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EvidenceFileTranslationSummary {
+    translation_status: String,
+    translation_error: Option<String>,
+    source_language: Option<String>,
+    target_language: Option<String>,
+    chunk_count: i64,
+    translated_chunk_count: i64,
+    failed_chunk_count: i64,
+    translation_provider: Option<String>,
+    translation_model: Option<String>,
+    translation_incomplete: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -95,6 +113,15 @@ struct EvidenceFileRow {
     parsed_text: Option<String>,
     page_count: Option<i64>,
     duration: Option<i64>,
+    translation_status: String,
+    translation_error: Option<String>,
+    source_language: Option<String>,
+    target_language: Option<String>,
+    chunk_count: i64,
+    translated_chunk_count: i64,
+    failed_chunk_count: i64,
+    translation_provider: Option<String>,
+    translation_model: Option<String>,
     created_at: String,
 }
 
@@ -133,6 +160,15 @@ async fn list_case_files(
             parsed_text,
             page_count,
             duration,
+            translation_status,
+            translation_error,
+            source_language,
+            target_language,
+            chunk_count,
+            translated_chunk_count,
+            failed_chunk_count,
+            translation_provider,
+            translation_model,
             created_at
         FROM evidence_files
         WHERE case_id = ?1 AND status != 'deleted'
@@ -149,16 +185,7 @@ async fn list_case_files(
 
     let files = rows
         .into_iter()
-        .map(|r| EvidenceFileSummary {
-            id: r.id,
-            original_name: r.original_name,
-            file_type: r.file_type,
-            file_size: r.file_size,
-            storage_path: r.storage_path,
-            parse_status: r.parse_status,
-            parse_error: r.parse_error,
-            created_at: r.created_at,
-        })
+        .map(evidence_file_summary_from_row)
         .collect();
 
     Ok(Json(ApiEnvelope::ok(EvidenceFileListData {
@@ -177,7 +204,7 @@ async fn upload_case_file(
     mut multipart: Multipart,
 ) -> AppResult<Json<ApiEnvelope<EvidenceFileDetail>>> {
     let case_id = normalize_case_id(&case_id)?;
-    crate::access::ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+    crate::access::ensure_case_write_access(&state.pool, user.user_id, &case_id).await?;
 
     let mut field = multipart
         .next_field()
@@ -223,7 +250,7 @@ async fn upload_case_file(
         if total as u64 > state.config.max_file_size {
             drop(f);
             let _ = tokio::fs::remove_file(&uploading_path).await;
-            return Err(AppError::bad_request("file too large"));
+            return Err(AppError::bad_request_code(420102, "file too large"));
         }
 
         if sniff.len() < SNIFF_LIMIT {
@@ -323,6 +350,15 @@ async fn upload_case_file(
             parsed_text,
             page_count,
             duration,
+            translation_status,
+            translation_error,
+            source_language,
+            target_language,
+            chunk_count,
+            translated_chunk_count,
+            failed_chunk_count,
+            translation_provider,
+            translation_model,
             created_at
         FROM evidence_files
         WHERE id = ?1
@@ -338,20 +374,7 @@ async fn upload_case_file(
         return Err(AppError::internal("file inserted but not found"));
     };
 
-    let detail = EvidenceFileDetail {
-        id: row.id,
-        case_id: row.case_id,
-        original_name: row.original_name,
-        file_type: row.file_type,
-        file_size: row.file_size,
-        storage_path: row.storage_path,
-        parse_status: row.parse_status,
-        parse_error: row.parse_error,
-        parsed_text: row.parsed_text,
-        page_count: row.page_count,
-        duration: row.duration,
-        created_at: row.created_at,
-    };
+    let detail = evidence_file_detail_from_row(row);
 
     // Audit log (avoid storing parsed_text).
     spawn_operation_log(
@@ -411,6 +434,56 @@ fn generate_stored_name(original: &str) -> String {
     match ext {
         Some(ext) => format!("{}.{}", uuid, ext),
         None => uuid.to_string(),
+    }
+}
+
+fn evidence_file_summary_from_row(row: EvidenceFileRow) -> EvidenceFileSummary {
+    let translation = translation_summary_from_row(&row);
+    EvidenceFileSummary {
+        id: row.id,
+        original_name: row.original_name,
+        file_type: row.file_type,
+        file_size: row.file_size,
+        storage_path: row.storage_path,
+        parse_status: row.parse_status,
+        parse_error: row.parse_error,
+        translation,
+        created_at: row.created_at,
+    }
+}
+
+fn evidence_file_detail_from_row(row: EvidenceFileRow) -> EvidenceFileDetail {
+    let translation = translation_summary_from_row(&row);
+    EvidenceFileDetail {
+        id: row.id,
+        case_id: row.case_id,
+        original_name: row.original_name,
+        file_type: row.file_type,
+        file_size: row.file_size,
+        storage_path: row.storage_path,
+        parse_status: row.parse_status,
+        parse_error: row.parse_error,
+        parsed_text: row.parsed_text,
+        page_count: row.page_count,
+        duration: row.duration,
+        translation,
+        created_at: row.created_at,
+    }
+}
+
+fn translation_summary_from_row(row: &EvidenceFileRow) -> EvidenceFileTranslationSummary {
+    EvidenceFileTranslationSummary {
+        translation_status: row.translation_status.clone(),
+        translation_error: row.translation_error.clone(),
+        source_language: row.source_language.clone(),
+        target_language: row.target_language.clone(),
+        chunk_count: row.chunk_count,
+        translated_chunk_count: row.translated_chunk_count,
+        failed_chunk_count: row.failed_chunk_count,
+        translation_provider: row.translation_provider.clone(),
+        translation_model: row.translation_model.clone(),
+        translation_incomplete: row.translation_status != "done"
+            || (row.translated_chunk_count + row.failed_chunk_count) < row.chunk_count,
     }
 }
 
