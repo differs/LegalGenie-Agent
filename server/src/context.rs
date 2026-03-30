@@ -16,16 +16,20 @@ pub struct RequestMeta {
 impl FromRequestParts<AppState> for RequestMeta {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &AppState) -> AppResult<Self> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> AppResult<Self> {
         let user_agent = parts
             .headers
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let ip_address = extract_forwarded_for(parts)
-            .or_else(|| extract_real_ip(parts))
-            .or_else(|| extract_connect_ip(parts));
+        let ip_address = if state.config.trust_proxy_headers {
+            extract_forwarded_for(parts)
+                .or_else(|| extract_real_ip(parts))
+                .or_else(|| extract_connect_ip(parts))
+        } else {
+            extract_connect_ip(parts)
+        };
 
         Ok(Self {
             request_id: Uuid::new_v4().to_string(),
