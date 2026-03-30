@@ -1,7 +1,7 @@
 use crate::config::AppConfig;
 use anyhow::{anyhow, Context};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -69,6 +69,13 @@ struct FileChunk {
     anchor_json: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExcelParsedBlock {
+    sheet_name: String,
+    cell_range: String,
+    text: String,
+}
+
 pub async fn enqueue_parse(
     pool: SqlitePool,
     config: AppConfig,
@@ -92,7 +99,7 @@ pub async fn enqueue_parse(
 
 async fn mark_processing(pool: &SqlitePool, file_id: &str, force: bool) -> anyhow::Result<bool> {
     let sql = if force {
-        "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = ?1 AND status != 'deleted'"
+        "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = ?1 AND status != 'deleted' AND parse_status != 'processing'"
     } else {
         "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = ?1 AND status != 'deleted' AND parse_status != 'processing'"
     };
@@ -266,18 +273,24 @@ async fn parse_and_update(
 
     // Guard runaway output (and keep json/db consistent).
     out.parsed_text = truncate_string(&out.parsed_text, 50_000_000);
-    write_parsed_artifact(config, &row, kind, &out).await?;
+    let artifact_path = write_parsed_artifact(config, &row, kind, &out).await?;
 
     let chunks = derive_chunks(kind, &out, translation_chunk_size_limit());
-    persist_chunks_and_mark_done(pool, &row, out, chunks).await?;
-    Ok(())
+    match persist_chunks_and_mark_done(pool, &row, out, chunks).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Avoid visible split-brain: artifact looks new but DB still has old parse state.
+            let _ = tokio::fs::remove_file(&artifact_path).await;
+            Err(e)
+        }
+    }
 }
 
 fn derive_chunks(kind: FileKind, out: &ParseOutput, chunk_size_limit: usize) -> Vec<FileChunk> {
     let limit = chunk_size_limit.max(1);
     match kind {
         FileKind::Pdf => derive_pdf_chunks(&out.parsed_text, limit),
-        FileKind::Excel => derive_excel_chunks(&out.parsed_text, limit),
+        FileKind::Excel => derive_excel_chunks(out, limit),
         FileKind::Audio => derive_audio_chunks(&out.parsed_text, out.duration, limit),
         FileKind::Text | FileKind::Docx | FileKind::Image | FileKind::Doc | FileKind::Unknown => {
             derive_text_chunks(&out.parsed_text, limit)
@@ -326,6 +339,8 @@ fn derive_pdf_chunks(text: &str, chunk_size_limit: usize) -> Vec<FileChunk> {
                 "locator_type": "page",
                 "display_label": display_label,
                 "page_number": page_number,
+                "page_part_index": seg,
+                "page_part_count": total,
             });
             push_chunk(
                 &mut chunks,
@@ -341,13 +356,16 @@ fn derive_pdf_chunks(text: &str, chunk_size_limit: usize) -> Vec<FileChunk> {
     chunks
 }
 
-fn derive_excel_chunks(text: &str, chunk_size_limit: usize) -> Vec<FileChunk> {
+fn derive_excel_chunks(out: &ParseOutput, chunk_size_limit: usize) -> Vec<FileChunk> {
     let mut chunks = Vec::new();
-    let sheets = split_excel_sheets(text);
     let mut segment_number = 1i64;
+    let mut blocks = parse_excel_blocks_from_extra(out.extra.as_ref());
+    if blocks.is_empty() {
+        blocks = parse_excel_blocks_from_text(&out.parsed_text);
+    }
 
-    for (sheet_name, sheet_text) in sheets {
-        let pieces = split_paragraphs_and_limit(&sheet_text, chunk_size_limit);
+    for block in blocks {
+        let pieces = split_paragraphs_and_limit(&block.text, chunk_size_limit);
         if pieces.is_empty() {
             continue;
         }
@@ -355,15 +373,19 @@ fn derive_excel_chunks(text: &str, chunk_size_limit: usize) -> Vec<FileChunk> {
         for (sub_idx, piece) in pieces.into_iter().enumerate() {
             let section = (sub_idx + 1) as i64;
             let display_label = if total <= 1 {
-                format!("工作表 {}", sheet_name)
+                format!("工作表 {} ({})", block.sheet_name, block.cell_range)
             } else {
-                format!("工作表 {}({}/{})", sheet_name, section, total)
+                format!(
+                    "工作表 {} ({}), {section}/{total}",
+                    block.sheet_name, block.cell_range
+                )
             };
             let anchor_json = serde_json::json!({
-                "locator_type": "sheet",
+                "locator_type": "sheet_block",
                 "display_label": display_label,
-                "sheet_name": sheet_name,
-                "cell_range": format!("synthetic:{section}/{total}"),
+                "sheet_name": block.sheet_name,
+                "block_index": section,
+                "cell_range": block.cell_range,
             });
             push_chunk(&mut chunks, 0, segment_number, "sheet", anchor_json, piece);
             segment_number += 1;
@@ -371,6 +393,27 @@ fn derive_excel_chunks(text: &str, chunk_size_limit: usize) -> Vec<FileChunk> {
     }
 
     chunks
+}
+
+fn parse_excel_blocks_from_extra(extra: Option<&serde_json::Value>) -> Vec<ExcelParsedBlock> {
+    let Some(extra) = extra else {
+        return Vec::new();
+    };
+    let Some(blocks) = extra.get("excel_blocks") else {
+        return Vec::new();
+    };
+    serde_json::from_value::<Vec<ExcelParsedBlock>>(blocks.clone()).unwrap_or_default()
+}
+
+fn parse_excel_blocks_from_text(text: &str) -> Vec<ExcelParsedBlock> {
+    split_excel_sheets(text)
+        .into_iter()
+        .map(|(sheet_name, sheet_text)| ExcelParsedBlock {
+            sheet_name,
+            cell_range: "rows 1-20".to_string(),
+            text: sheet_text,
+        })
+        .collect()
 }
 
 fn derive_audio_chunks(
@@ -386,23 +429,24 @@ fn derive_audio_chunks(
 
     let total = pieces.len() as i64;
     let d = duration.unwrap_or(0).max(0);
+    let duration_ms = d.saturating_mul(1000);
     for (idx, piece) in pieces.into_iter().enumerate() {
         let segment_number = (idx + 1) as i64;
-        let (start_second, end_second) = if d > 0 {
-            let start = (d * idx as i64) / total;
-            let end = (d * (idx as i64 + 1)) / total;
+        let (start_ms, end_ms) = if duration_ms > 0 {
+            let start = (duration_ms * idx as i64) / total;
+            let end = (duration_ms * (idx as i64 + 1)) / total;
             (start, end.max(start))
         } else {
-            let start = idx as i64 * 30;
-            (start, start + 30)
+            let start = idx as i64 * 30_000;
+            (start, start + 30_000)
         };
-        let display_label = format!("第 {segment_number} 段");
+        let display_label = format!("第 {segment_number} 段 ({start_ms}ms-{end_ms}ms)");
         let anchor_json = serde_json::json!({
-            "locator_type": "time_range_synthetic",
+            "locator_type": "time_range",
             "display_label": display_label,
             "segment_number": segment_number,
-            "start_second": start_second,
-            "end_second": end_second,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
             "synthetic": true,
         });
         push_chunk(
@@ -451,12 +495,19 @@ fn push_chunk(
 fn split_pdf_pages(text: &str) -> Vec<String> {
     let normalized = normalize_newlines(text);
     if normalized.contains('\u{000c}') {
-        normalized
+        let mut pages = normalized
             .split('\u{000c}')
             .map(str::trim)
-            .filter(|s| !s.is_empty())
             .map(ToString::to_string)
-            .collect()
+            .collect::<Vec<_>>();
+        // pdftotext may append a trailing form-feed delimiter after the last page.
+        if normalized.ends_with('\u{000c}')
+            && pages.len() > 1
+            && pages.last().is_some_and(String::is_empty)
+        {
+            pages.pop();
+        }
+        pages
     } else {
         let trimmed = normalized.trim();
         if trimmed.is_empty() {
@@ -756,6 +807,7 @@ fn parse_excel_sync(path: &Path) -> anyhow::Result<ParseOutput> {
 
     const MAX_CELLS: usize = 200_000;
     const MAX_TEXT_BYTES: usize = 5_000_000;
+    const BLOCK_ROW_WINDOW: usize = 20;
 
     let mut workbook =
         open_workbook_auto(path).with_context(|| format!("open excel: {}", path.display()))?;
@@ -763,6 +815,7 @@ fn parse_excel_sync(path: &Path) -> anyhow::Result<ParseOutput> {
     let mut text = String::new();
     let mut cell_count: usize = 0;
     let mut truncated = false;
+    let mut excel_blocks: Vec<ExcelParsedBlock> = Vec::new();
 
     for sheet in &sheet_names {
         if cell_count >= MAX_CELLS || text.len() >= MAX_TEXT_BYTES {
@@ -782,7 +835,18 @@ fn parse_excel_sync(path: &Path) -> anyhow::Result<ParseOutput> {
         text.push_str(sheet);
         text.push('\n');
 
-        for row in range.rows() {
+        let start_row = range.start().map(|(r, _)| r as i64 + 1).unwrap_or(1);
+        let mut rows_in_window: usize = 0;
+        let mut window_start_row = start_row;
+        let mut window_end_row = start_row.saturating_sub(1);
+        let mut window_lines: Vec<String> = Vec::new();
+
+        for (row_idx, row) in range.rows().enumerate() {
+            let row_number = start_row + row_idx as i64;
+            rows_in_window = rows_in_window.saturating_add(1);
+            window_end_row = row_number;
+
+            let mut row_parts: Vec<String> = Vec::new();
             for cell in row {
                 if cell_count >= MAX_CELLS || text.len() >= MAX_TEXT_BYTES {
                     truncated = true;
@@ -805,16 +869,45 @@ fn parse_excel_sync(path: &Path) -> anyhow::Result<ParseOutput> {
                 };
 
                 if !s.is_empty() {
-                    text.push_str(&s);
-                    text.push(' ');
+                    row_parts.push(s);
                 }
                 cell_count = cell_count.saturating_add(1);
+            }
+
+            if !row_parts.is_empty() {
+                let row_text = row_parts.join(" ");
+                text.push_str(&row_text);
+                text.push('\n');
+                window_lines.push(row_text);
+            } else {
+                text.push('\n');
+            }
+
+            if rows_in_window >= BLOCK_ROW_WINDOW {
+                flush_excel_block(
+                    &mut excel_blocks,
+                    sheet,
+                    window_start_row,
+                    window_end_row,
+                    &mut window_lines,
+                );
+                rows_in_window = 0;
+                window_start_row = row_number.saturating_add(1);
             }
 
             if truncated {
                 break;
             }
-            text.push('\n');
+        }
+
+        if rows_in_window > 0 {
+            flush_excel_block(
+                &mut excel_blocks,
+                sheet,
+                window_start_row,
+                window_end_row.max(window_start_row),
+                &mut window_lines,
+            );
         }
         text.push('\n');
     }
@@ -827,8 +920,33 @@ fn parse_excel_sync(path: &Path) -> anyhow::Result<ParseOutput> {
             "sheet_names": sheet_names,
             "cell_count": cell_count,
             "truncated": truncated,
+            "excel_blocks": excel_blocks,
         })),
     })
+}
+
+fn flush_excel_block(
+    blocks: &mut Vec<ExcelParsedBlock>,
+    sheet_name: &str,
+    row_start: i64,
+    row_end: i64,
+    lines: &mut Vec<String>,
+) {
+    if lines.is_empty() {
+        return;
+    }
+
+    let text = lines.join("\n").trim().to_string();
+    lines.clear();
+    if text.is_empty() {
+        return;
+    }
+
+    blocks.push(ExcelParsedBlock {
+        sheet_name: sheet_name.to_string(),
+        cell_range: format!("rows {}-{}", row_start, row_end.max(row_start)),
+        text,
+    });
 }
 
 async fn parse_docx(path: &Path) -> anyhow::Result<ParseOutput> {
@@ -933,7 +1051,7 @@ async fn write_parsed_artifact(
     row: &EvidenceFileToParse,
     kind: FileKind,
     out: &ParseOutput,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PathBuf> {
     let rel = format!("parsed/{}/{}.json", row.case_id, row.id);
     let full_path = PathBuf::from(&config.storage_path).join(&rel);
 
@@ -962,7 +1080,7 @@ async fn write_parsed_artifact(
         .await
         .with_context(|| format!("write parsed json: {}", full_path.display()))?;
 
-    Ok(())
+    Ok(full_path)
 }
 
 async fn audio_duration_seconds(path: &Path) -> anyhow::Result<f64> {
@@ -1116,4 +1234,119 @@ fn source_text_hash(text: &str) -> String {
 
 fn truncate_string(s: impl AsRef<str>, max_chars: usize) -> String {
     s.as_ref().chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pdf_form_feed_chunks_keep_page_numbers_and_labels() {
+        let chunks = derive_pdf_chunks("第一页内容\x0c第二页内容", 2_000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].page_number, 1);
+        assert_eq!(chunks[0].display_label, "第 1 页");
+        assert_eq!(chunks[1].page_number, 2);
+        assert_eq!(chunks[1].display_label, "第 2 页");
+
+        let anchor0: serde_json::Value =
+            serde_json::from_str(&chunks[0].anchor_json).expect("valid anchor json");
+        let anchor1: serde_json::Value =
+            serde_json::from_str(&chunks[1].anchor_json).expect("valid anchor json");
+        assert_eq!(anchor0["page_number"].as_i64(), Some(1));
+        assert_eq!(anchor1["page_number"].as_i64(), Some(2));
+        assert_eq!(anchor0["page_part_index"].as_i64(), Some(1));
+        assert_eq!(anchor0["page_part_count"].as_i64(), Some(1));
+        assert_eq!(anchor1["page_part_index"].as_i64(), Some(1));
+        assert_eq!(anchor1["page_part_count"].as_i64(), Some(1));
+    }
+
+    #[test]
+    fn pdf_blank_page_keeps_following_page_number() {
+        let chunks = derive_pdf_chunks("第一页内容\x0c\x0c第三页内容", 2_000);
+        assert_eq!(chunks.len(), 2, "blank page should not produce chunk");
+        assert_eq!(chunks[0].page_number, 1);
+        assert_eq!(
+            chunks[1].page_number, 3,
+            "page number should not shift left"
+        );
+        assert_eq!(chunks[1].display_label, "第 3 页");
+    }
+
+    #[test]
+    fn pdf_single_page_split_has_machine_readable_part_fields() {
+        let chunks = derive_pdf_chunks("abcdefghijklmnopqrstuvwxyz", 5);
+        assert!(chunks.len() > 1, "expected page split into multiple chunks");
+
+        let expected_total = chunks.len() as i64;
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let anchor: serde_json::Value =
+                serde_json::from_str(&chunk.anchor_json).expect("valid anchor json");
+            assert_eq!(anchor["page_number"].as_i64(), Some(1));
+            assert_eq!(anchor["page_part_index"].as_i64(), Some(idx as i64 + 1));
+            assert_eq!(anchor["page_part_count"].as_i64(), Some(expected_total));
+        }
+    }
+
+    #[test]
+    fn excel_blocks_preserve_sheet_name_and_cell_range_from_parse_stage() {
+        use rust_xlsxwriter::Workbook;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("excel-blocks.xlsx");
+
+        let mut workbook = Workbook::new();
+        let worksheet = workbook.add_worksheet();
+        let _ = worksheet.set_name("Data");
+        worksheet.write_string(0, 0, "alpha").expect("write row 1");
+        worksheet.write_string(19, 3, "beta").expect("write row 20");
+        worksheet
+            .write_string(20, 0, "gamma")
+            .expect("write row 21");
+        workbook.save(&path).expect("save xlsx");
+
+        let out = parse_excel_sync(&path).expect("parse excel");
+        let parsed_blocks = parse_excel_blocks_from_extra(out.extra.as_ref());
+        assert!(
+            !parsed_blocks.is_empty(),
+            "excel blocks should be present in parse extra"
+        );
+        assert_eq!(parsed_blocks[0].sheet_name, "Data");
+        assert_eq!(parsed_blocks[0].cell_range, "rows 1-20");
+
+        let chunks = derive_chunks(FileKind::Excel, &out, 2_000);
+        assert!(!chunks.is_empty(), "excel should produce chunks");
+        let anchor: serde_json::Value =
+            serde_json::from_str(&chunks[0].anchor_json).expect("valid anchor json");
+        assert_eq!(anchor["sheet_name"].as_str(), Some("Data"));
+        assert_eq!(anchor["cell_range"].as_str(), Some("rows 1-20"));
+    }
+
+    #[test]
+    fn audio_chunks_have_ms_range_and_synthetic_anchor() {
+        let chunks = derive_audio_chunks("Alpha\n\nBeta", Some(12), 2_000);
+        assert_eq!(chunks.len(), 2);
+
+        for chunk in chunks {
+            assert!(
+                chunk.display_label.contains("ms-"),
+                "display_label should include ms range"
+            );
+            let anchor: serde_json::Value =
+                serde_json::from_str(&chunk.anchor_json).expect("valid anchor json");
+            let start_ms = anchor
+                .get("start_ms")
+                .and_then(|v| v.as_i64())
+                .expect("start_ms");
+            let end_ms = anchor
+                .get("end_ms")
+                .and_then(|v| v.as_i64())
+                .expect("end_ms");
+            assert!(end_ms >= start_ms, "end_ms should be >= start_ms");
+            assert_eq!(
+                anchor.get("synthetic").and_then(|v| v.as_bool()),
+                Some(true)
+            );
+        }
+    }
 }

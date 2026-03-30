@@ -1,9 +1,10 @@
 mod test_support;
 
+use axum::http::{Method, StatusCode};
 use serde_json::Value;
 use sqlx::Row;
 use test_support::{
-    build_test_app_with_pool, create_case, register_user, upload_text_file,
+    build_test_app_with_pool, create_case, register_user, request_json, upload_text_file,
     wait_for_file_parse_done,
 };
 
@@ -99,6 +100,9 @@ async fn parsing_creates_chunks_for_uploaded_file() {
             parse_status,
             translation_status,
             translation_error,
+            source_language,
+            translation_model,
+            translation_provider,
             translated_chunk_count,
             failed_chunk_count,
             chunk_count
@@ -118,6 +122,21 @@ async fn parsing_creates_chunks_for_uploaded_file() {
         file_row.get::<Option<String>, _>("translation_error"),
         None,
         "translation_error should be reset to NULL"
+    );
+    assert_eq!(
+        file_row.get::<Option<String>, _>("source_language"),
+        None,
+        "source_language should be reset to NULL"
+    );
+    assert_eq!(
+        file_row.get::<Option<String>, _>("translation_model"),
+        None,
+        "translation_model should be reset to NULL"
+    );
+    assert_eq!(
+        file_row.get::<Option<String>, _>("translation_provider"),
+        None,
+        "translation_provider should be reset to NULL"
     );
     assert_eq!(file_row.get::<i64, _>("translated_chunk_count"), 0);
     assert_eq!(file_row.get::<i64, _>("failed_chunk_count"), 0);
@@ -210,9 +229,155 @@ async fn parsing_creates_chunks_for_uploaded_file() {
         combined_source.contains("Alpha") && combined_source.contains("Beta"),
         "chunk source_text should include original paragraphs"
     );
+    let initial_chunk_count = chunk_rows.len() as i64;
     assert_eq!(
         file_row.get::<i64, _>("chunk_count"),
-        chunk_rows.len() as i64,
+        initial_chunk_count,
         "file.chunk_count should match actual chunk rows"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE evidence_files
+        SET
+            translation_status = 'failed',
+            translation_error = 'stale error',
+            source_language = 'en',
+            translation_model = 'old-model',
+            translation_provider = 'old-provider',
+            translated_chunk_count = 7,
+            failed_chunk_count = 1
+        WHERE id = ?1
+        "#,
+    )
+    .bind(&evidence_id)
+    .execute(&pool)
+    .await
+    .expect("mark file stale before reparse");
+
+    let stale_chunk_id = "stale-chunk-for-reparse";
+    sqlx::query(
+        r#"
+        INSERT INTO evidence_file_chunks (
+            id,
+            evidence_id,
+            case_id,
+            chunk_index,
+            page_number,
+            segment_number,
+            chunk_kind,
+            display_label,
+            source_text,
+            char_count,
+            token_estimate,
+            anchor_json,
+            source_text_hash,
+            translation_status
+        )
+        VALUES (?1, ?2, ?3, 999, 0, 999, 'text', 'stale', 'stale chunk', 11, 3, ?4, 'stalehash', 'done')
+        "#,
+    )
+    .bind(stale_chunk_id)
+    .bind(&evidence_id)
+    .bind(&case_id)
+    .bind(serde_json::json!({
+        "locator_type": "segment",
+        "display_label": "stale",
+        "segment_number": 999
+    }).to_string())
+    .execute(&pool)
+    .await
+    .expect("insert stale chunk before reparse");
+
+    let reparse = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/files/{evidence_id}/parse"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(reparse.0, StatusCode::OK, "reparse trigger should succeed");
+    let reparsed_detail = wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    assert_eq!(reparsed_detail.0, StatusCode::OK);
+    assert_eq!(
+        reparsed_detail.1["data"]["parse_status"]
+            .as_str()
+            .unwrap_or(""),
+        "done",
+        "expected parse_status=done after reparse"
+    );
+
+    let stale_chunk_count: i64 =
+        sqlx::query("SELECT COUNT(1) AS cnt FROM evidence_file_chunks WHERE id = ?1")
+            .bind(stale_chunk_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count stale chunk")
+            .get("cnt");
+    assert_eq!(
+        stale_chunk_count, 0,
+        "stale chunk should be deleted during reparse"
+    );
+
+    let file_row_after = sqlx::query(
+        r#"
+        SELECT
+            translation_status,
+            translation_error,
+            source_language,
+            translation_model,
+            translation_provider,
+            translated_chunk_count,
+            failed_chunk_count,
+            chunk_count
+        FROM evidence_files
+        WHERE id = ?1
+        LIMIT 1
+        "#,
+    )
+    .bind(&evidence_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch file row after reparse");
+
+    assert_eq!(
+        file_row_after.get::<String, _>("translation_status"),
+        "pending"
+    );
+    assert_eq!(
+        file_row_after.get::<Option<String>, _>("translation_error"),
+        None
+    );
+    assert_eq!(
+        file_row_after.get::<Option<String>, _>("source_language"),
+        None
+    );
+    assert_eq!(
+        file_row_after.get::<Option<String>, _>("translation_model"),
+        None
+    );
+    assert_eq!(
+        file_row_after.get::<Option<String>, _>("translation_provider"),
+        None
+    );
+    assert_eq!(file_row_after.get::<i64, _>("translated_chunk_count"), 0);
+    assert_eq!(file_row_after.get::<i64, _>("failed_chunk_count"), 0);
+
+    let chunk_count_after: i64 =
+        sqlx::query("SELECT COUNT(1) AS cnt FROM evidence_file_chunks WHERE evidence_id = ?1")
+            .bind(&evidence_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count chunks after reparse")
+            .get("cnt");
+    assert_eq!(
+        chunk_count_after, initial_chunk_count,
+        "reparse should replace chunks, not append extra chunks"
+    );
+    assert_eq!(
+        file_row_after.get::<i64, _>("chunk_count"),
+        chunk_count_after,
+        "file.chunk_count should match chunks after reparse"
     );
 }
