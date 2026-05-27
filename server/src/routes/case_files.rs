@@ -333,8 +333,8 @@ async fn upload_case_file(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     crate::parser::enqueue_parse(state.clone(), file_id.to_string(), true)
-    .await
-    .map_err(|e| AppError::internal(format!("enqueue parse failed: {e}")))?;
+        .await
+        .map_err(|e| AppError::internal(format!("enqueue parse failed: {e}")))?;
 
     let row: Option<EvidenceFileRow> = sqlx::query_as(
         r#"

@@ -5,6 +5,7 @@ use http_body_util::BodyExt;
 use legalminds_server::{router, AppConfig, AppEnv, AppState, CorsOrigins};
 use serde_json::json;
 use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::SqlitePool;
 use std::time::Duration;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
@@ -378,6 +379,367 @@ async fn smoke_flow_creates_audit_logs() {
 }
 
 #[tokio::test]
+async fn logout_invalidates_existing_refresh_token() {
+    let (app, _tmp) = build_test_app().await;
+
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "logoutuser",
+            "email": "logoutuser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let access_token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+    let refresh_token = register.1["data"]["refresh_token"]
+        .as_str()
+        .expect("refresh_token")
+        .to_string();
+
+    let logout = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/logout",
+        Some(&access_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(logout.0, StatusCode::OK);
+
+    let refresh = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/refresh",
+        None,
+        json!({
+            "refresh_token": refresh_token,
+        }),
+    )
+    .await;
+    assert_eq!(refresh.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn change_password_invalidates_existing_refresh_token() {
+    let (app, _tmp) = build_test_app().await;
+
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "pwchangeuser",
+            "email": "pwchangeuser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let access_token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+    let refresh_token = register.1["data"]["refresh_token"]
+        .as_str()
+        .expect("refresh_token")
+        .to_string();
+
+    let change = request_json(
+        &app,
+        Method::PUT,
+        "/api/v1/auth/password",
+        Some(&access_token),
+        json!({
+            "old_password": "Password123",
+            "new_password": "NewPassword123",
+        }),
+    )
+    .await;
+    assert_eq!(change.0, StatusCode::OK);
+
+    let refresh = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/refresh",
+        None,
+        json!({
+            "refresh_token": refresh_token,
+        }),
+    )
+    .await;
+    assert_eq!(refresh.0, StatusCode::UNAUTHORIZED);
+
+    let login = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        json!({
+            "username": "pwchangeuser",
+            "password": "NewPassword123",
+        }),
+    )
+    .await;
+    assert_eq!(login.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn deleted_case_detail_returns_not_found() {
+    let (app, _tmp) = build_test_app().await;
+
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "deletedcaseuser",
+            "email": "deletedcaseuser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let case_resp = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/cases",
+        Some(&token),
+        json!({
+            "name": "Deleted Case",
+        }),
+    )
+    .await;
+    assert_eq!(case_resp.0, StatusCode::OK);
+    let case_id = case_resp.1["data"]["id"]
+        .as_str()
+        .expect("case id")
+        .to_string();
+
+    let delete_resp = request_json(
+        &app,
+        Method::DELETE,
+        &format!("/api/v1/cases/{case_id}"),
+        Some(&token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(delete_resp.0, StatusCode::OK);
+
+    let detail = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}"),
+        Some(&token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(detail.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn move_timeline_node_resequences_same_day_order() {
+    let (app, _tmp) = build_test_app().await;
+
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "timelineuser",
+            "email": "timelineuser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let case_resp = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/cases",
+        Some(&token),
+        json!({
+            "name": "Timeline Sort Case",
+            "description": "desc",
+        }),
+    )
+    .await;
+    assert_eq!(case_resp.0, StatusCode::OK);
+    let case_id = case_resp.1["data"]["id"]
+        .as_str()
+        .expect("case id")
+        .to_string();
+
+    let mut ids = Vec::new();
+    for title in ["A", "B", "C"] {
+        let node_resp = request_json(
+            &app,
+            Method::POST,
+            &format!("/api/v1/cases/{case_id}/timeline/nodes"),
+            Some(&token),
+            json!({
+                "title": title,
+                "event_time": "2024-01-01",
+            }),
+        )
+        .await;
+        assert_eq!(node_resp.0, StatusCode::OK);
+        ids.push(
+            node_resp.1["data"]["id"]
+                .as_str()
+                .expect("node id")
+                .to_string(),
+        );
+    }
+
+    let move_resp = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/timeline/nodes/{}/move", ids[2]),
+        Some(&token),
+        json!({
+            "new_time": "2024-01-01",
+            "new_sort_order": 1,
+        }),
+    )
+    .await;
+    assert_eq!(move_resp.0, StatusCode::OK);
+
+    let list_resp = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/timeline/nodes?page=1&page_size=20"),
+        Some(&token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(list_resp.0, StatusCode::OK);
+
+    let nodes = list_resp.1["data"]["nodes"]
+        .as_array()
+        .expect("nodes array");
+    let titles = nodes
+        .iter()
+        .map(|node| node["title"].as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(titles, vec!["C", "A", "B"]);
+
+    let sort_orders = nodes
+        .iter()
+        .map(|node| node["sort_order"].as_i64().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(sort_orders, vec![100, 200, 300]);
+}
+
+#[tokio::test]
+async fn timeline_tags_filter_returns_expected_nodes() {
+    let (app, _tmp) = build_test_app().await;
+
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "taguser",
+            "email": "taguser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let case_resp = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/cases",
+        Some(&token),
+        json!({
+            "name": "Tags Filter Case",
+        }),
+    )
+    .await;
+    assert_eq!(case_resp.0, StatusCode::OK);
+    let case_id = case_resp.1["data"]["id"]
+        .as_str()
+        .expect("case id")
+        .to_string();
+
+    let tagged = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/cases/{case_id}/timeline/nodes"),
+        Some(&token),
+        json!({
+            "title": "Tagged",
+            "event_time": "2024-01-10",
+            "tags": ["alpha", "beta"],
+        }),
+    )
+    .await;
+    assert_eq!(tagged.0, StatusCode::OK);
+    let tagged_id = tagged.1["data"]["id"]
+        .as_str()
+        .expect("tagged node id")
+        .to_string();
+
+    let alpha_only = request_json(
+        &app,
+        Method::POST,
+        &format!("/api/v1/cases/{case_id}/timeline/nodes"),
+        Some(&token),
+        json!({
+            "title": "Alpha only",
+            "event_time": "2024-01-11",
+            "tags": ["alpha"],
+        }),
+    )
+    .await;
+    assert_eq!(alpha_only.0, StatusCode::OK);
+
+    let list = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/cases/{case_id}/timeline/nodes?tags=alpha,beta&page=1&page_size=50"),
+        Some(&token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(list.0, StatusCode::OK);
+    let nodes = list.1["data"]["nodes"].as_array().expect("nodes array");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(
+        nodes[0]["id"].as_str().unwrap_or(""),
+        tagged_id,
+        "expected only the alpha+beta node to match tags=alpha,beta"
+    );
+}
+
+#[tokio::test]
 async fn upload_over_2mb_is_allowed() {
     let (app, _tmp) = build_test_app().await;
 
@@ -612,7 +974,129 @@ async fn office_files_produce_parsed_artifacts() {
     assert_eq!(doc_parsed.0, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn legacy_file_without_chunks_still_remains_usable() {
+    let (app, _tmp, pool) = build_test_app_with_pool().await;
+
+    let register = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "legacy_user",
+            "email": "legacy_user@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(register.0, StatusCode::OK);
+    let token = register.1["data"]["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let case_resp = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/cases",
+        Some(&token),
+        json!({
+            "name": "Legacy Case",
+        }),
+    )
+    .await;
+    assert_eq!(case_resp.0, StatusCode::OK);
+    let case_id = case_resp.1["data"]["id"]
+        .as_str()
+        .expect("case id")
+        .to_string();
+
+    let upload = request_multipart_text(
+        &app,
+        &format!("/api/v1/cases/{case_id}/files"),
+        &token,
+        "legacy.txt",
+        "Legacy source text\n",
+    )
+    .await;
+    assert_eq!(upload.0, StatusCode::OK);
+    let file_id = upload.1["data"]["id"]
+        .as_str()
+        .expect("file id")
+        .to_string();
+
+    let detail = wait_for_file_parse_done(&app, &token, &file_id).await;
+    assert_eq!(detail.0, StatusCode::OK);
+
+    sqlx::query(
+        r#"
+        UPDATE evidence_files
+        SET
+            translation_status = 'failed',
+            translation_error = 'reparse required for bilingual translation',
+            chunk_count = 0,
+            translated_chunk_count = 0,
+            failed_chunk_count = 0
+        WHERE id = ?1
+        "#,
+    )
+    .bind(&file_id)
+    .execute(&pool)
+    .await
+    .expect("reset translation aggregate for legacy fallback");
+    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
+        .bind(&file_id)
+        .execute(&pool)
+        .await
+        .expect("delete chunks for legacy fallback");
+
+    let detail = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/files/{file_id}"),
+        Some(&token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(detail.0, StatusCode::OK);
+    assert_eq!(detail.1["data"]["chunk_count"].as_i64(), Some(0));
+    assert_eq!(
+        detail.1["data"]["translation_status"].as_str(),
+        Some("failed")
+    );
+    assert!(detail.1["data"]["parsed_text"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Legacy source text"));
+
+    let search = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=Legacy&case_id={case_id}&language_mode=zh"),
+        Some(&token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(search.0, StatusCode::OK);
+    let results = search.1["data"]["results"]
+        .as_array()
+        .expect("results array");
+    assert!(
+        results.iter().any(|item| {
+            item["file_id"].as_str() == Some(file_id.as_str())
+                && item["source_fallback"].as_bool() == Some(true)
+        }),
+        "expected legacy fallback evidence hit in zh mode: {results:?}"
+    );
+}
+
 async fn build_test_app() -> (axum::Router, TempDir) {
+    let (app, tmp, _pool) = build_test_app_with_pool().await;
+    (app, tmp)
+}
+
+async fn build_test_app_with_pool() -> (axum::Router, TempDir, SqlitePool) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -650,6 +1134,7 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         database_url: "sqlite::memory:".to_string(),
         cors_origins: CorsOrigins::Any,
         force_https: false,
+        trust_proxy_headers: false,
         jwt_secret: "test-secret-please-change-32-chars-min".to_string(),
         access_token_expire_minutes: 60,
         refresh_token_expire_days: 7,
@@ -669,8 +1154,8 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         asr_threads: 1,
     };
 
-    let state = AppState::new(cfg, pool);
-    (router(state), tmp)
+    let state = AppState::new(cfg, pool.clone());
+    (router(state), tmp, pool)
 }
 
 async fn request_json(

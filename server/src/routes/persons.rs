@@ -1,4 +1,3 @@
-use crate::access::ensure_case_access;
 use crate::api::ApiEnvelope;
 use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
@@ -156,7 +155,10 @@ async fn update_person(
 ) -> AppResult<Json<ApiEnvelope<PersonDetail>>> {
     let person_id = normalize_uuid(&id, "invalid person id")?;
     let existing = fetch_person_with_access(&state, &user, &person_id).await?;
-    let case_id = primary_case_for_person(&state, &user, &person_id).await?;
+    let case_id = primary_writable_case_for_person(&state, &user, &person_id).await?;
+    if case_id.is_none() {
+        return Err(AppError::forbidden("read-only case access"));
+    }
 
     let old_value = serde_json::json!({
         "id": existing.id.clone(),
@@ -308,7 +310,10 @@ async fn delete_person(
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     let person_id = normalize_uuid(&id, "invalid person id")?;
     let existing = fetch_person_with_access(&state, &user, &person_id).await?;
-    let case_id = primary_case_for_person(&state, &user, &person_id).await?;
+    let case_id = primary_writable_case_for_person(&state, &user, &person_id).await?;
+    if case_id.is_none() {
+        return Err(AppError::forbidden("read-only case access"));
+    }
 
     let old_value = serde_json::json!({
         "id": existing.id.clone(),
@@ -371,9 +376,15 @@ async fn link_case(
     let person_id = normalize_uuid(&id, "invalid person id")?;
     // Ensure caller can see the person.
     let person = fetch_person_with_access(&state, &user, &person_id).await?;
+    if primary_writable_case_for_person(&state, &user, &person_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::forbidden("read-only case access"));
+    }
 
     let case_id = normalize_uuid(&req.case_id, "invalid case_id")?;
-    ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+    crate::access::ensure_case_write_access(&state.pool, user.user_id, &case_id).await?;
 
     let role_type = req.role_type.trim().to_ascii_lowercase();
     if role_type.is_empty() {
@@ -482,31 +493,33 @@ async fn fetch_person_with_access(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    row.ok_or_else(|| AppError::not_found("person not found"))
+    row.ok_or_else(|| AppError::not_found_code(440101, "person not found"))
 }
 
-async fn primary_case_for_person(
+async fn primary_writable_case_for_person(
     state: &AppState,
     user: &AuthUser,
     person_id: &str,
 ) -> AppResult<Option<String>> {
+    let uid = user.user_id.to_string();
     let row: Option<(String,)> = sqlx::query_as(
         r#"
         SELECT l.case_id
         FROM person_case_links l
         JOIN cases c ON c.id = l.case_id
+        LEFT JOIN case_members m ON m.case_id = c.id AND m.user_id = ?2
         WHERE l.person_id = ?1
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
-                SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
-          ))
+          AND (
+            c.owner_id = ?2
+            OR (m.role_in_case IN ('owner', 'member'))
+          )
         ORDER BY l.created_at DESC
         LIMIT 1
         "#,
     )
     .bind(person_id)
-    .bind(user.user_id.to_string())
+    .bind(uid)
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;

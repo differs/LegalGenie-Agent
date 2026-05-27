@@ -70,6 +70,7 @@ pub async fn get_me(base: &str, token: &str) -> Result<crate::models::UserInfo, 
     env.into_data()
 }
 
+#[allow(dead_code)]
 pub async fn get_cases(
     base: &str,
     token: &str,
@@ -85,6 +86,7 @@ pub async fn get_cases(
     env.into_data()
 }
 
+#[allow(dead_code)]
 pub async fn post_create_case(
     base: &str,
     token: &str,
@@ -102,6 +104,17 @@ pub async fn post_create_case(
         })),
     )
     .await?;
+    env.into_data()
+}
+
+pub async fn get_case_member_me(
+    base: &str,
+    token: &str,
+    case_id: &str,
+) -> Result<crate::models::CaseMemberMeData, String> {
+    let url = build_url(base, &format!("/api/v1/cases/{case_id}/members/me"));
+    let env: ApiEnvelope<crate::models::CaseMemberMeData> =
+        request_json("GET", &url, Some(token), None).await?;
     env.into_data()
 }
 
@@ -196,6 +209,61 @@ pub async fn get_file_detail(
     env.into_data()
 }
 
+pub async fn get_file_chunks(
+    base: &str,
+    token: &str,
+    file_id: &str,
+    page: i64,
+    page_size: i64,
+    view_mode: Option<&str>,
+) -> Result<crate::models::EvidenceFileChunkListData, String> {
+    let mut parts = Vec::new();
+    parts.push(format!("page={}", page.max(1)));
+    parts.push(format!("page_size={}", page_size.clamp(1, 200)));
+    if let Some(mode) = view_mode {
+        let mode = mode.trim();
+        if !mode.is_empty() {
+            parts.push(format!("view_mode={}", urlencoding::encode(mode)));
+        }
+    }
+
+    let url = build_url(
+        base,
+        &format!("/api/v1/files/{file_id}/chunks?{}", parts.join("&")),
+    );
+    let env: ApiEnvelope<crate::models::EvidenceFileChunkListData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn get_file_translation(
+    base: &str,
+    token: &str,
+    file_id: &str,
+) -> Result<crate::models::EvidenceFileTranslationDetail, String> {
+    let url = build_url(base, &format!("/api/v1/files/{file_id}/translation"));
+    let env: ApiEnvelope<crate::models::EvidenceFileTranslationDetail> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_retry_translation(
+    base: &str,
+    token: &str,
+    file_id: &str,
+    scope: &str,
+    chunk_ids: Option<Vec<String>>,
+) -> Result<crate::models::RetryTranslationResult, String> {
+    let url = build_url(base, &format!("/api/v1/files/{file_id}/translate/retry"));
+    let body = json!({
+        "scope": scope,
+        "chunk_ids": chunk_ids,
+    });
+    let env: ApiEnvelope<crate::models::RetryTranslationResult> =
+        request_json("POST", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
 pub async fn post_parse_file(
     base: &str,
     token: &str,
@@ -257,6 +325,499 @@ pub async fn download_file(
     request_bytes("GET", &url, Some(token)).await
 }
 
+// Timeline
+
+pub async fn get_timeline_nodes(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    tags: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<crate::models::TimelineNodeListData, String> {
+    let mut parts = Vec::new();
+    parts.push(format!("page={}", page.max(1)));
+    parts.push(format!("page_size={}", page_size.clamp(1, 500)));
+    if let Some(s) = start_date {
+        let s = s.trim();
+        if !s.is_empty() {
+            parts.push(format!("start_date={}", urlencoding::encode(s)));
+        }
+    }
+    if let Some(s) = end_date {
+        let s = s.trim();
+        if !s.is_empty() {
+            parts.push(format!("end_date={}", urlencoding::encode(s)));
+        }
+    }
+    if let Some(raw) = tags {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            parts.push(format!("tags={}", urlencoding::encode(raw)));
+        }
+    }
+
+    let url = build_url(
+        base,
+        &format!("/api/v1/cases/{case_id}/timeline/nodes?{}", parts.join("&")),
+    );
+    let env: ApiEnvelope<crate::models::TimelineNodeListData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn get_timeline_node_detail(
+    base: &str,
+    token: &str,
+    node_id: &str,
+) -> Result<crate::models::TimelineNode, String> {
+    let url = build_url(base, &format!("/api/v1/timeline/nodes/{node_id}"));
+    let env: ApiEnvelope<crate::models::TimelineNode> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_create_timeline_node(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    title: &str,
+    description: Option<&str>,
+    event_time: &str,
+    tags: Vec<String>,
+) -> Result<crate::models::TimelineNode, String> {
+    let url = build_url(base, &format!("/api/v1/cases/{case_id}/timeline/nodes"));
+    let body = json!({
+        "title": title,
+        "description": description,
+        "event_time": event_time,
+        "tags": tags,
+    });
+    let env: ApiEnvelope<crate::models::TimelineNode> =
+        request_json("POST", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn put_update_timeline_node(
+    base: &str,
+    token: &str,
+    node_id: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    event_time: Option<&str>,
+    tags: Option<Vec<String>>,
+) -> Result<crate::models::TimelineNode, String> {
+    let url = build_url(base, &format!("/api/v1/timeline/nodes/{node_id}"));
+    let body = json!({
+        "title": title,
+        "description": description,
+        "event_time": event_time,
+        "tags": tags,
+    });
+    let env: ApiEnvelope<crate::models::TimelineNode> =
+        request_json("PUT", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn post_move_timeline_node(
+    base: &str,
+    token: &str,
+    node_id: &str,
+    new_time: &str,
+    new_sort_order: Option<i64>,
+) -> Result<crate::models::TimelineNode, String> {
+    let url = build_url(base, &format!("/api/v1/timeline/nodes/{node_id}/move"));
+    let body = json!({
+        "new_time": new_time,
+        "new_sort_order": new_sort_order,
+    });
+    let env: ApiEnvelope<crate::models::TimelineNode> =
+        request_json("POST", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn delete_timeline_node(
+    base: &str,
+    token: &str,
+    node_id: &str,
+) -> Result<serde_json::Value, String> {
+    let url = build_url(base, &format!("/api/v1/timeline/nodes/{node_id}"));
+    let env: ApiEnvelope<serde_json::Value> =
+        request_json("DELETE", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_link_node_evidence(
+    base: &str,
+    token: &str,
+    node_id: &str,
+    evidence_id: &str,
+    anchor_type: &str,
+    anchor_data: Option<serde_json::Value>,
+) -> Result<crate::models::TimelineEvidenceLink, String> {
+    let url = build_url(base, &format!("/api/v1/timeline/nodes/{node_id}/evidence"));
+    let body = json!({
+        "evidence_id": evidence_id,
+        "anchor_type": anchor_type,
+        "anchor_data": anchor_data,
+    });
+    let env: ApiEnvelope<crate::models::TimelineEvidenceLink> =
+        request_json("POST", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn delete_unlink_node_evidence(
+    base: &str,
+    token: &str,
+    node_id: &str,
+    link_id: &str,
+) -> Result<serde_json::Value, String> {
+    let url = build_url(
+        base,
+        &format!("/api/v1/timeline/nodes/{node_id}/evidence/{link_id}"),
+    );
+    let env: ApiEnvelope<serde_json::Value> =
+        request_json("DELETE", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+// Persons
+
+pub async fn get_case_persons(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    page: i64,
+    page_size: i64,
+) -> Result<crate::models::CasePersonListData, String> {
+    let url = build_url(
+        base,
+        &format!("/api/v1/cases/{case_id}/persons?page={page}&page_size={page_size}"),
+    );
+    let env: ApiEnvelope<crate::models::CasePersonListData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn get_case_person_graph(
+    base: &str,
+    token: &str,
+    case_id: &str,
+) -> Result<crate::models::PersonGraphData, String> {
+    let url = build_url(base, &format!("/api/v1/cases/{case_id}/persons/graph"));
+    let env: ApiEnvelope<crate::models::PersonGraphData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_create_case_person(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    name: &str,
+    gender: Option<&str>,
+    phone: Option<&str>,
+    email: Option<&str>,
+    organization: Option<&str>,
+    position: Option<&str>,
+    role_type: Option<&str>,
+    role_detail: Option<&str>,
+    involved_date: Option<&str>,
+) -> Result<crate::models::CasePersonItem, String> {
+    let url = build_url(base, &format!("/api/v1/cases/{case_id}/persons"));
+    let body = json!({
+        "name": name,
+        "gender": gender,
+        "phone": phone,
+        "email": email,
+        "organization": organization,
+        "position": position,
+        "role_type": role_type,
+        "role_detail": role_detail,
+        "involved_date": involved_date,
+    });
+    let env: ApiEnvelope<crate::models::CasePersonItem> =
+        request_json("POST", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn get_person_detail(
+    base: &str,
+    token: &str,
+    person_id: &str,
+) -> Result<crate::models::PersonDetail, String> {
+    let url = build_url(base, &format!("/api/v1/persons/{person_id}"));
+    let env: ApiEnvelope<crate::models::PersonDetail> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn put_update_person(
+    base: &str,
+    token: &str,
+    person_id: &str,
+    name: Option<&str>,
+    gender: Option<&str>,
+    phone: Option<&str>,
+    email: Option<&str>,
+    organization: Option<&str>,
+    position: Option<&str>,
+    notes: Option<&str>,
+) -> Result<crate::models::PersonDetail, String> {
+    let url = build_url(base, &format!("/api/v1/persons/{person_id}"));
+    let body = json!({
+        "name": name,
+        "gender": gender,
+        "phone": phone,
+        "email": email,
+        "organization": organization,
+        "position": position,
+        "notes": notes,
+    });
+    let env: ApiEnvelope<crate::models::PersonDetail> =
+        request_json("PUT", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn delete_person(
+    base: &str,
+    token: &str,
+    person_id: &str,
+) -> Result<serde_json::Value, String> {
+    let url = build_url(base, &format!("/api/v1/persons/{person_id}"));
+    let env: ApiEnvelope<serde_json::Value> =
+        request_json("DELETE", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_person_link_case(
+    base: &str,
+    token: &str,
+    person_id: &str,
+    case_id: &str,
+    role_type: &str,
+    role_detail: Option<&str>,
+    involved_date: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let url = build_url(base, &format!("/api/v1/persons/{person_id}/cases"));
+    let body = json!({
+        "case_id": case_id,
+        "role_type": role_type,
+        "role_detail": role_detail,
+        "involved_date": involved_date,
+    });
+    let env: ApiEnvelope<serde_json::Value> =
+        request_json("POST", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn get_case_persons_dedupe(
+    base: &str,
+    token: &str,
+    case_id: &str,
+) -> Result<crate::models::DedupeCandidatesData, String> {
+    let url = build_url(base, &format!("/api/v1/cases/{case_id}/persons/dedupe"));
+    let env: ApiEnvelope<crate::models::DedupeCandidatesData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_merge_case_persons(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    source_person_id: &str,
+    target_person_id: &str,
+) -> Result<crate::models::MergeCasePersonsData, String> {
+    let url = build_url(base, &format!("/api/v1/cases/{case_id}/persons/merge"));
+    let body = json!({
+        "source_person_id": source_person_id,
+        "target_person_id": target_person_id,
+    });
+    let env: ApiEnvelope<crate::models::MergeCasePersonsData> =
+        request_json("POST", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn get_case_person_relationships(
+    base: &str,
+    token: &str,
+    case_id: &str,
+) -> Result<crate::models::RelationshipListData, String> {
+    let url = build_url(
+        base,
+        &format!("/api/v1/cases/{case_id}/persons/relationships"),
+    );
+    let env: ApiEnvelope<crate::models::RelationshipListData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn post_create_case_person_relationship(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    from_person_id: &str,
+    to_person_id: &str,
+    rel_type: &str,
+    rel_detail: Option<&str>,
+) -> Result<crate::models::RelationshipItem, String> {
+    let url = build_url(
+        base,
+        &format!("/api/v1/cases/{case_id}/persons/relationships"),
+    );
+    let body = json!({
+        "from_person_id": from_person_id,
+        "to_person_id": to_person_id,
+        "rel_type": rel_type,
+        "rel_detail": rel_detail,
+    });
+    let env: ApiEnvelope<crate::models::RelationshipItem> =
+        request_json("POST", &url, Some(token), Some(body)).await?;
+    env.into_data()
+}
+
+pub async fn delete_case_person_relationship(
+    base: &str,
+    token: &str,
+    case_id: &str,
+    relationship_id: &str,
+) -> Result<serde_json::Value, String> {
+    let url = build_url(
+        base,
+        &format!("/api/v1/cases/{case_id}/persons/relationships/{relationship_id}"),
+    );
+    let env: ApiEnvelope<serde_json::Value> =
+        request_json("DELETE", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+// Search
+
+pub async fn get_search(
+    base: &str,
+    token: &str,
+    keyword: &str,
+    object_types: Option<&str>,
+    case_id: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<crate::models::SearchResponseData, String> {
+    get_search_with_language_mode(
+        base,
+        token,
+        keyword,
+        object_types,
+        case_id,
+        None,
+        page,
+        page_size,
+    )
+    .await
+}
+
+pub async fn get_search_with_language_mode(
+    base: &str,
+    token: &str,
+    keyword: &str,
+    object_types: Option<&str>,
+    case_id: Option<&str>,
+    language_mode: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> Result<crate::models::SearchResponseData, String> {
+    let url = build_search_url(
+        base,
+        keyword,
+        object_types,
+        case_id,
+        language_mode,
+        page,
+        page_size,
+    );
+    let env: ApiEnvelope<crate::models::SearchResponseData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+fn build_search_url(
+    base: &str,
+    keyword: &str,
+    object_types: Option<&str>,
+    case_id: Option<&str>,
+    language_mode: Option<&str>,
+    page: i64,
+    page_size: i64,
+) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("keyword={}", urlencoding::encode(keyword.trim())));
+    parts.push(format!("page={}", page.max(1)));
+    parts.push(format!("page_size={}", page_size.clamp(1, 200)));
+
+    if let Some(mode) = language_mode {
+        let mode = mode.trim();
+        if !mode.is_empty() {
+            parts.push(format!("language_mode={}", urlencoding::encode(mode)));
+        }
+    }
+    if let Some(ot) = object_types {
+        let ot = ot.trim();
+        if !ot.is_empty() {
+            parts.push(format!("object_types={}", urlencoding::encode(ot)));
+        }
+    }
+    if let Some(cid) = case_id {
+        let cid = cid.trim();
+        if !cid.is_empty() {
+            parts.push(format!("case_id={}", urlencoding::encode(cid)));
+        }
+    }
+
+    build_url(base, &format!("/api/v1/search?{}", parts.join("&")))
+}
+
+pub async fn get_search_suggestions(
+    base: &str,
+    token: &str,
+    keyword: &str,
+) -> Result<crate::models::SuggestionsData, String> {
+    let kw = keyword.trim();
+    let url = build_url(
+        base,
+        &format!(
+            "/api/v1/search/suggestions?keyword={}",
+            urlencoding::encode(kw)
+        ),
+    );
+    let env: ApiEnvelope<crate::models::SuggestionsData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn get_search_history(
+    base: &str,
+    token: &str,
+    page: i64,
+    page_size: i64,
+) -> Result<crate::models::SearchHistoryData, String> {
+    let url = build_url(
+        base,
+        &format!("/api/v1/search/history?page={page}&page_size={page_size}"),
+    );
+    let env: ApiEnvelope<crate::models::SearchHistoryData> =
+        request_json("GET", &url, Some(token), None).await?;
+    env.into_data()
+}
+
+pub async fn delete_search_history(base: &str, token: &str) -> Result<serde_json::Value, String> {
+    let url = build_url(base, "/api/v1/search/history");
+    let env: ApiEnvelope<serde_json::Value> =
+        request_json("DELETE", &url, Some(token), None).await?;
+    env.into_data()
+}
+
 pub async fn download_and_save(
     base: &str,
     token: &str,
@@ -309,6 +870,8 @@ async fn request_json<T: DeserializeOwned>(
         let mut req = match method {
             "GET" => Request::get(url),
             "POST" => Request::post(url),
+            "PUT" => Request::put(url),
+            "DELETE" => Request::delete(url),
             other => return Err(format!("unsupported method (wasm): {other}")),
         };
         if let Some(t) = token {
@@ -386,6 +949,7 @@ async fn request_bytes(
         let filename = resp
             .headers()
             .get("content-disposition")
+            .as_deref()
             .and_then(filename_from_content_disposition);
 
         let bytes = resp.binary().await.map_err(|e| e.to_string())?;
@@ -458,6 +1022,22 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_language_mode_toggle_updates_request() {
+        let base = "http://localhost:8080";
+        let url_zh = build_search_url(base, "alpha", None, None, Some("zh"), 1, 20);
+        let url_src = build_search_url(base, "alpha", None, None, Some("source"), 1, 20);
+
+        assert!(url_zh.contains("language_mode=zh"));
+        assert!(url_src.contains("language_mode=source"));
+        assert_ne!(url_zh, url_src);
+    }
+}
+
 fn sanitize_filename(raw: &str) -> String {
     let mut s = raw.replace('\\', "_").replace('/', "_").replace('"', "_");
     if s.trim().is_empty() {
@@ -505,16 +1085,15 @@ fn trigger_browser_download(
 ) -> Result<(), String> {
     use js_sys::{Array, Uint8Array};
     use wasm_bindgen::JsCast;
-    use wasm_bindgen::JsValue;
     use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url};
 
     let array = Uint8Array::from(bytes);
     let parts = Array::new();
     parts.push(&array.buffer());
 
-    let mut bag = BlobPropertyBag::new();
+    let bag = BlobPropertyBag::new();
     if let Some(ct) = content_type {
-        bag.type_(ct);
+        bag.set_type(ct);
     }
     let blob = Blob::new_with_u8_array_sequence_and_options(&parts, &bag)
         .map_err(|_| "failed to create blob".to_string())?;
@@ -535,7 +1114,8 @@ fn trigger_browser_download(
 
     a.set_href(&url);
     a.set_download(filename);
-    a.style().set_property("display", "none").ok();
+    // Keep the download anchor invisible without requiring extra web-sys features.
+    a.set_attribute("style", "display:none;").ok();
 
     document
         .body()

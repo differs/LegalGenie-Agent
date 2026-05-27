@@ -281,7 +281,7 @@ async fn get_case(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let Some(row) = row else {
-        return Err(AppError::not_found("case not found"));
+        return Err(AppError::not_found_code(410101, "case not found"));
     };
 
     ensure_case_access(&state, &user, &row).await?;
@@ -319,10 +319,10 @@ async fn update_case(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let Some(existing) = existing else {
-        return Err(AppError::not_found("case not found"));
+        return Err(AppError::not_found_code(410101, "case not found"));
     };
 
-    ensure_case_access(&state, &user, &existing).await?;
+    crate::access::ensure_case_write_access(&state.pool, user.user_id, &existing.id).await?;
 
     let old_tags = existing
         .tags
@@ -475,24 +475,7 @@ async fn ensure_case_access(
     user: &AuthUser,
     case_row: &CaseRow,
 ) -> AppResult<()> {
-    if case_row.owner_id == user.user_id.to_string() {
-        return Ok(());
-    }
-
-    let member: Option<(String,)> = sqlx::query_as(
-        "SELECT role_in_case FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1",
-    )
-    .bind(&case_row.id)
-    .bind(user.user_id.to_string())
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
-
-    if member.is_some() {
-        Ok(())
-    } else {
-        Err(AppError::forbidden("no case access"))
-    }
+    crate::access::ensure_case_access(&state.pool, user.user_id, &case_row.id).await
 }
 
 async fn fetch_case_detail(
@@ -509,7 +492,7 @@ async fn fetch_case_detail(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let Some(row) = row else {
-        return Err(AppError::not_found("case not found"));
+        return Err(AppError::not_found_code(410101, "case not found"));
     };
     ensure_case_access(state, user, &row).await?;
 

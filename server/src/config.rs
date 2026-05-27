@@ -75,11 +75,9 @@ impl TranslationConfig {
         let base_url = env_optional_string("TRANSLATION_BASE_URL");
         let api_key = env_optional_string("TRANSLATION_API_KEY");
         let model = env_optional_string("TRANSLATION_MODEL");
-        let target_language =
-            env_string("TRANSLATION_TARGET_LANGUAGE", &defaults.target_language);
+        let target_language = env_string("TRANSLATION_TARGET_LANGUAGE", &defaults.target_language);
         let max_concurrency = env_u16("TRANSLATION_MAX_CONCURRENCY", defaults.max_concurrency)?;
-        let chunk_size_limit =
-            env_u32("TRANSLATION_CHUNK_SIZE_LIMIT", defaults.chunk_size_limit)?;
+        let chunk_size_limit = env_u32("TRANSLATION_CHUNK_SIZE_LIMIT", defaults.chunk_size_limit)?;
 
         if max_concurrency == 0 {
             anyhow::bail!("TRANSLATION_MAX_CONCURRENCY must be >= 1");

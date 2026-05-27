@@ -28,19 +28,19 @@ pub fn validate_upload(
         .to_ascii_lowercase();
 
     if ext.is_empty() {
-        return Err(AppError::bad_request("invalid file extension"));
+        return Err(AppError::bad_request_code(420103, "invalid file extension"));
     }
 
     if !allowed_file_types.is_empty() && !allowed_file_types.iter().any(|t| t == &ext) {
-        return Err(AppError::bad_request("unsupported file type"));
+        return Err(AppError::bad_request_code(420103, "unsupported file type"));
     }
 
     let guessed = mime_guess::from_ext(&ext)
         .first_raw()
-        .ok_or_else(|| AppError::bad_request("unknown file type"))?;
+        .ok_or_else(|| AppError::bad_request_code(420103, "unknown file type"))?;
 
     if !SUPPORTED_MIME_TYPES.contains(&guessed) {
-        return Err(AppError::bad_request("unsupported file type"));
+        return Err(AppError::bad_request_code(420103, "unsupported file type"));
     }
 
     let detected = infer::get(header_bytes)
@@ -48,7 +48,7 @@ pub fn validate_upload(
         .unwrap_or("application/octet-stream");
 
     if !mime_compatible(guessed, detected) {
-        return Err(AppError::bad_request("file type mismatch"));
+        return Err(AppError::bad_request_code(420103, "file type mismatch"));
     }
 
     Ok(guessed.to_string())

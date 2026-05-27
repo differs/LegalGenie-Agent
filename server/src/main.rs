@@ -1,7 +1,5 @@
 use anyhow::Context;
-use legalminds_server::{
-    create_pool, router, translation, AppConfig, AppState, TranslationConfig,
-};
+use legalminds_server::{create_pool, router, translation, AppConfig, AppState, TranslationConfig};
 use std::net::SocketAddr;
 
 #[tokio::main]

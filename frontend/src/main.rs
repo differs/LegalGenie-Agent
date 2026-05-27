@@ -10,11 +10,14 @@ use std::hash::{Hash, Hasher};
 use dioxus::prelude::*;
 use models::UserInfo;
 use shell::{
-    auth_gate_label, build_action_queue, derive_auth_gate, workspace_tab_for_auth_gate, AuthGate,
-    ConversationStage, HistoryScope, ObjectKind, Tab,
+    auth_gate_label, build_action_queue, build_shell_brief, derive_auth_gate,
+    insert_selected_object, remove_inserted_context, submit_local_conversation_message,
+    toggle_inserted_context_expanded, workspace_tab_for_auth_gate, AuthGate, CanvasKind,
+    ConversationStage, HistoryScope, SelectedObject, Tab,
 };
+use workspace::utilities::UtilitySurface;
 use workspace::view_model::{
-    conversation_view_model, inserted_context_view_model, left_rail_history_item,
+    conversation_view_model, inserted_context_view_models, left_rail_history_item,
     suggested_action_summaries,
 };
 
@@ -27,7 +30,7 @@ fn main() {
 fn main() {
     let cfg = dioxus::desktop::Config::new().with_window(
         dioxus::desktop::WindowBuilder::new()
-            .with_title("LegalMinds")
+            .with_title("LegalGenie Agent")
             .with_inner_size(dioxus::desktop::LogicalSize::new(1280.0, 820.0)),
     );
     dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(App);
@@ -38,6 +41,7 @@ pub struct AppCtx {
     pub api_base: Signal<String>,
     pub token: Signal<String>,
     pub case_id: Signal<String>,
+    pub case_id_draft: Signal<String>,
     pub case_role: Signal<Option<String>>,
     pub case_role_loading: Signal<bool>,
     pub user: Signal<Option<UserInfo>>,
@@ -55,6 +59,10 @@ impl AppCtx {
 
     pub fn case_id(&self) -> String {
         (self.case_id)()
+    }
+
+    pub fn case_id_draft(&self) -> String {
+        (self.case_id_draft)()
     }
 
     pub fn user(&self) -> Option<UserInfo> {
@@ -83,6 +91,7 @@ fn App() -> Element {
     let mut token_draft = use_signal(String::new);
     let mut session_refresh_tick = use_signal(|| 0u64);
     let mut case_id = use_signal(String::new);
+    let mut case_id_draft = use_signal(String::new);
     let case_role = use_signal(|| None::<String>);
     let case_role_loading = use_signal(|| false);
     let mut user = use_signal(|| None::<UserInfo>);
@@ -91,12 +100,18 @@ fn App() -> Element {
     let mut show_devtools = use_signal(|| false);
     let history_scope = use_signal(|| HistoryScope::CurrentCase);
     let mut conversation_items = use_signal(Vec::<String>::new);
+    let mut composer_draft = use_signal(String::new);
+    let mut inserted_context_store = use_signal(Vec::<shell::InsertedContext>::new);
+    let mut selected_canvas_object = use_signal(|| None::<SelectedObject>);
     let mut conversation_context_key = use_signal(String::new);
+    let mut canvas = use_signal(|| None::<CanvasKind>);
+    let mut active_utility = use_signal(|| None::<UtilitySurface>);
 
     provide_context(AppCtx {
         api_base,
         token,
         case_id,
+        case_id_draft,
         case_role,
         case_role_loading,
         user,
@@ -176,7 +191,18 @@ fn App() -> Element {
         let key = conversation_scope_key(token().trim(), case_id().trim());
         if conversation_context_key() != key {
             conversation_items.set(Vec::new());
+            composer_draft.set(String::new());
+            inserted_context_store.set(Vec::new());
+            selected_canvas_object.set(None);
+            canvas.set(None);
+            active_utility.set(None);
             conversation_context_key.set(key);
+        }
+    });
+
+    use_effect(move || {
+        if tab() != Tab::Brief && canvas().is_some() {
+            canvas.set(None);
         }
     });
 
@@ -194,6 +220,10 @@ fn App() -> Element {
         let mut session_refresh_tick = session_refresh_tick;
         let mut tab = tab;
         let mut conversation_items = conversation_items;
+        let mut composer_draft = composer_draft;
+        let mut inserted_context_store = inserted_context_store;
+        let mut selected_canvas_object = selected_canvas_object;
+        let mut canvas = canvas;
         spawn(async move {
             status.set(Some("Logging in...".to_string()));
             match api::post_login(&base, &username, &password).await {
@@ -202,6 +232,11 @@ fn App() -> Element {
                     token_draft.set(data.access_token);
                     user.set(None);
                     conversation_items.set(Vec::new());
+                    composer_draft.set(String::new());
+                    inserted_context_store.set(Vec::new());
+                    selected_canvas_object.set(None);
+                    canvas.set(None);
+                    active_utility.set(None);
                     session_refresh_tick.set(session_refresh_tick() + 1);
                     tab.set(Tab::Brief);
                     status.set(Some("Login succeeded. Verifying session...".to_string()));
@@ -230,6 +265,10 @@ fn App() -> Element {
         let mut auth_mode = auth_mode;
         let mut tab = tab;
         let mut conversation_items = conversation_items;
+        let mut composer_draft = composer_draft;
+        let mut inserted_context_store = inserted_context_store;
+        let mut selected_canvas_object = selected_canvas_object;
+        let mut canvas = canvas;
         spawn(async move {
             if username.trim().is_empty() || email.trim().is_empty() {
                 status.set(Some("username/email required".to_string()));
@@ -249,6 +288,11 @@ fn App() -> Element {
                     token_draft.set(data.access_token);
                     user.set(None);
                     conversation_items.set(Vec::new());
+                    composer_draft.set(String::new());
+                    inserted_context_store.set(Vec::new());
+                    selected_canvas_object.set(None);
+                    canvas.set(None);
+                    active_utility.set(None);
                     session_refresh_tick.set(session_refresh_tick() + 1);
                     auth_mode.set(AuthMode::Login);
                     tab.set(Tab::Brief);
@@ -282,7 +326,13 @@ fn App() -> Element {
         token_draft.set(String::new());
         user.set(None);
         case_id.set(String::new());
+        case_id_draft.set(String::new());
         conversation_items.set(Vec::new());
+        composer_draft.set(String::new());
+        inserted_context_store.set(Vec::new());
+        selected_canvas_object.set(None);
+        canvas.set(None);
+        active_utility.set(None);
         session_refresh_tick.set(session_refresh_tick() + 1);
         status.set(Some("Cleared connection state".to_string()));
     };
@@ -296,7 +346,16 @@ fn App() -> Element {
     let connected = workspace_tab.is_some();
     let selected_case_id = case_id();
     let current_role = case_role();
-    let active_tab = tab();
+    let active_tab = match (active_utility(), canvas()) {
+        (Some(UtilitySurface::Cases), _) => Tab::Cases,
+        (Some(UtilitySurface::Search), _) => Tab::Search,
+        (Some(UtilitySurface::Logs), _) => Tab::Logs,
+        (None, Some(CanvasKind::Timeline)) => Tab::Timeline,
+        (None, Some(CanvasKind::Evidence)) => Tab::Files,
+        (None, Some(CanvasKind::Persons)) => Tab::Persons,
+        (None, Some(CanvasKind::Exports)) => Tab::Exports,
+        (None, None) => tab(),
+    };
     let shell_state = shell::ShellState {
         signed_in: connected,
         has_case: !selected_case_id.trim().is_empty(),
@@ -305,6 +364,7 @@ fn App() -> Element {
         username: user().as_ref().map(|u| u.username.clone()),
     };
     let action_queue = build_action_queue(&shell_state);
+    let brief = build_shell_brief(&shell_state);
     let conversation_stage = if conversation_items().is_empty() {
         ConversationStage::Empty
     } else {
@@ -318,11 +378,10 @@ fn App() -> Element {
         left_rail_history_item("会话 C", history_scope_value, Some("建设工程纠纷案")),
     ];
     let action_summaries = suggested_action_summaries(&action_queue);
-    let inserted_contexts = vec![inserted_context_view_model(
-        "付款节点",
-        ObjectKind::TimelineNode,
-        false,
-    )];
+    let inserted_contexts = inserted_context_view_models(&inserted_context_store());
+    let selected_object_id = selected_canvas_object()
+        .as_ref()
+        .map(|item| item.id.clone());
     let session_line = ctx_user_line(user()).unwrap_or_else(|| match auth_gate {
         AuthGate::Ready => "Signed in with verified session".to_string(),
         AuthGate::Verifying => "Waiting for /auth/me verification".to_string(),
@@ -351,31 +410,116 @@ fn App() -> Element {
                     auth_gate_badge_class,
                     history_scope: history_scope_value,
                     history_items,
+                    brief,
                     conversation,
+                    canvas: canvas(),
+                    selected_object_id,
                     conversation_items: conversation_items(),
                     action_summaries,
                     inserted_contexts,
+                    composer_draft: composer_draft(),
+                    active_utility: active_utility(),
                 },
                 bindings: workspace::frame::WorkspaceFrameBindings {
                     tab,
                     case_id,
+                    case_id_draft,
                     history_scope,
+                    active_utility,
+                    canvas,
                 },
                 on_start_conversation: move |prompt: String| {
                     let mut items = conversation_items;
+                    let mut draft = composer_draft;
                     let mut status = status;
-                    items.write().push(prompt.clone());
-                    status.set(Some(format!("Started local conversation from starter: {prompt}")));
+                    {
+                        let mut draft_guard = draft.write();
+                        *draft_guard = prompt.clone();
+                    }
+                    let submitted = {
+                        let mut items_guard = items.write();
+                        let mut draft_guard = draft.write();
+                        submit_local_conversation_message(&mut items_guard, &mut draft_guard)
+                    };
+                    if submitted {
+                        status.set(Some(format!("Started local conversation from starter: {prompt}")));
+                    }
+                },
+                on_change_draft: move |next| composer_draft.set(next),
+                on_submit_message: move |_| {
+                    let mut items = conversation_items;
+                    let mut draft = composer_draft;
+                    let mut status = status;
+                    let submitted = {
+                        let mut items_guard = items.write();
+                        let mut draft_guard = draft.write();
+                        submit_local_conversation_message(&mut items_guard, &mut draft_guard)
+                    };
+                    if submitted {
+                        status.set(Some("Submitted message to local conversation".to_string()));
+                    } else {
+                        status.set(Some("Message is empty; nothing submitted".to_string()));
+                    }
+                },
+                on_open_canvas: move |canvas_kind| {
+                    selected_canvas_object.set(None);
+                    active_utility.set(None);
+                    canvas.set(Some(canvas_kind));
+                },
+                on_select_canvas_object: move |selected| selected_canvas_object.set(Some(selected)),
+                on_insert_canvas_object: move |_| {
+                    let selected = selected_canvas_object();
+                    let mut contexts = inserted_context_store;
+                    let mut status = status;
+                    let inserted = {
+                        let mut contexts_guard = contexts.write();
+                        insert_selected_object(&selected, &mut contexts_guard)
+                    };
+                    if inserted {
+                        selected_canvas_object.set(None);
+                        status.set(Some("Inserted canvas context into the conversation".to_string()));
+                    } else if selected.is_some() {
+                        status.set(Some("That canvas context is already in the conversation".to_string()));
+                    } else {
+                        status.set(Some("Select a canvas object before inserting it into the conversation".to_string()));
+                    }
+                },
+                on_toggle_context: move |id: String| {
+                    let mut contexts = inserted_context_store;
+                    let mut status = status;
+                    let toggled = {
+                        let mut contexts_guard = contexts.write();
+                        toggle_inserted_context_expanded(&mut contexts_guard, &id)
+                    };
+                    if toggled {
+                        status.set(Some("Toggled inserted context details".to_string()));
+                    }
+                },
+                on_remove_context: move |id: String| {
+                    let mut contexts = inserted_context_store;
+                    let mut status = status;
+                    let removed = {
+                        let mut contexts_guard = contexts.write();
+                        remove_inserted_context(&mut contexts_guard, &id)
+                    };
+                    if removed {
+                        status.set(Some("Removed inserted context from the conversation".to_string()));
+                    }
+                },
+                on_close_canvas: move |_| {
+                    selected_canvas_object.set(None);
+                    canvas.set(None);
                 },
             }
         } else {
             div { class: "auth-shell",
-                div { class: "auth-shell__grid",
-                    section { class: "card auth-shell__hero",
+            div {
+                class: if show_devtools() { "auth-shell__grid auth-shell__grid--with-dev" } else { "auth-shell__grid" },
+                section { class: "card auth-shell__hero",
                         div { class: "shell__brand shell__brand--auth",
                             div { class: "logo", "LM" }
                             div {
-                                h1 { "LegalMinds" }
+                                h1 { "LegalGenie Agent" }
                                 p { "AI-led legal command center" }
                             }
                         }
@@ -392,7 +536,7 @@ fn App() -> Element {
                     section { class: "card auth-shell__card",
                         div { class: "card__topline",
                             h3 { if auth_mode() == AuthMode::Login { "Sign In" } else { "Create Account" } }
-                            p { class: "muted", "Use an account for the full flow, or paste a token in the connection panel." }
+                            p { class: "muted", "Use your account for the full flow. The app will fetch and verify the session token automatically after login." }
                         }
 
                         div { class: "auth__mode",
@@ -465,39 +609,52 @@ fn App() -> Element {
                                 }
                             },
                         }
+
+                        div { class: "auth__support",
+                            p { class: "muted", "正常用户不需要手动处理 Access Token。只有调试 API base 或注入现有会话时，才需要开发者工具。" }
+                            button {
+                                class: "btn btn--ghost btn--small",
+                                onclick: move |_| show_devtools.set(!show_devtools()),
+                                if show_devtools() { "Hide developer tools" } else { "Developer tools" }
+                            }
+                        }
                     }
 
-                    section { class: "card auth-shell__card auth-shell__card--dev",
-                        div { class: "card__topline",
-                            div {
-                                h3 { "Connection" }
-                                p { class: "muted", "Paste a token here to jump straight into the command center." }
+                    if show_devtools() {
+                        section { class: "card auth-shell__card auth-shell__card--dev",
+                            div { class: "card__topline",
+                                div {
+                                    h3 { "Developer Session Tools" }
+                                    p { class: "muted", "Advanced only. Override API base or paste an existing access token when debugging session recovery." }
+                                }
+                                span { class: auth_gate_badge_class, "{auth_gate_badge_text}" }
                             }
-                            span { class: auth_gate_badge_class, "{auth_gate_badge_text}" }
-                        }
-                        label { "API Base"
-                            input {
-                                value: api_base(),
-                                placeholder: "http://127.0.0.1:8001",
-                                oninput: move |e| api_base.set(e.value()),
+                            p { class: "muted", "Login and register already populate this token from the backend response. You only need this panel for manual session injection." }
+                            label { "API Base"
+                                input {
+                                    value: api_base(),
+                                    placeholder: "http://127.0.0.1:8001",
+                                    oninput: move |e| api_base.set(e.value()),
+                                }
                             }
-                        }
-                        label { "Access Token"
-                            textarea {
-                                value: token_draft(),
-                                placeholder: "Paste Bearer token here...",
-                                oninput: move |e| token_draft.set(e.value()),
-                                rows: 4,
+                            label { "Access Token"
+                                textarea {
+                                    value: token_draft(),
+                                    placeholder: "Paste Bearer token here...",
+                                    oninput: move |e| token_draft.set(e.value()),
+                                    rows: 4,
+                                }
                             }
-                        }
-                        div { class: "actions",
-                            button {
-                                class: "btn btn--accent",
-                                disabled: session_verifying,
-                                onclick: on_apply_token,
-                                if session_verifying { "Verifying..." } else { "Verify Session" }
+                            div { class: "actions",
+                                button {
+                                    class: "btn btn--accent",
+                                    disabled: session_verifying,
+                                    onclick: on_apply_token,
+                                    if session_verifying { "Verifying..." } else { "Verify Session" }
+                                }
+                                button { class: "btn btn--ghost", onclick: on_clear_connection, "Clear" }
+                                button { class: "btn btn--ghost", onclick: move |_| show_devtools.set(false), "Close developer tools" }
                             }
-                            button { class: "btn btn--ghost", onclick: on_clear_connection, "Clear" }
                         }
                     }
                 }
@@ -900,9 +1057,12 @@ body:before{
   max-width:1480px;
   margin:0 auto;
   display:grid;
-  grid-template-columns:1.15fr 0.95fr 0.9fr;
+  grid-template-columns:1.15fr 0.95fr;
   gap:18px;
   align-items:start;
+}
+.auth-shell__grid--with-dev{
+  grid-template-columns:1.15fr 0.95fr 0.9fr;
 }
 .auth-shell__hero{
   min-height:420px;
@@ -924,6 +1084,19 @@ body:before{
 }
 .auth-shell__card--dev{
   background:linear-gradient(180deg, rgba(238,242,246,0.96), rgba(255,255,255,0.92));
+}
+.auth__support{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  padding-top:6px;
+  border-top:1px solid rgba(20,32,43,0.08);
+}
+.auth__support p{
+  margin:0;
+  max-width:440px;
+  line-height:1.55;
 }
 .status--shell{margin:0;}
 .status--auth{
@@ -1386,61 +1559,289 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
 .workspace-shell{
   min-height:100vh;
   display:grid;
-  grid-template-columns:300px minmax(0, 1fr) 320px;
+  grid-template-columns:260px minmax(0, 1fr) 280px;
+  gap:16px;
+  padding:16px 18px 18px;
+}
+.workspace-center-stack{
+  grid-column:2;
+  grid-row:1;
+  display:grid;
+  align-content:start;
   gap:14px;
-  padding:14px;
+  min-height:0;
 }
 .left-rail{
   grid-column:1;
-  grid-row:1 / span 2;
-  border:1px solid var(--line);
-  background:var(--paper);
-  border-radius:20px;
-  padding:14px;
+  grid-row:1;
+  border:1px solid rgba(20,32,43,0.08);
+  background:linear-gradient(180deg, rgba(255,255,255,0.94), rgba(247,244,237,0.90));
+  border-radius:22px;
+  padding:16px;
   display:grid;
-  gap:12px;
+  gap:14px;
   align-content:start;
+  box-shadow:var(--shadow);
 }
 .left-rail__brand{display:flex;gap:10px;align-items:center;}
+.left-rail__brand strong{font-size:16px;}
+.left-rail__brand p{margin:3px 0 0 0;}
 .left-rail__card{
-  border:1px solid var(--line);
-  border-radius:14px;
-  padding:10px;
-  background:rgba(255,255,255,0.7);
+  border:1px solid rgba(20,32,43,0.08);
+  border-radius:16px;
+  padding:12px;
+  background:rgba(255,255,255,0.88);
 }
 .left-rail__scope{display:flex;justify-content:space-between;gap:10px;align-items:center;}
 .left-rail__scope-actions{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;}
 .left-rail__history{display:grid;gap:8px;}
 .left-rail__history-item{
-  border:1px solid var(--line);
-  border-radius:12px;
-  padding:8px;
+  border:1px solid rgba(20,32,43,0.08);
+  border-radius:14px;
+  padding:10px 12px;
+  background:linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.92));
+  display:grid;
+  gap:4px;
 }
 .conversation-pane{
-  grid-column:2;
-  grid-row:1;
   display:grid;
-  gap:12px;
+  gap:14px;
   align-content:start;
 }
-.conversation-pane__header{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;}
-.quick-entry-grid{
+.conversation-pane__header{
+  display:flex;
+  justify-content:space-between;
+  gap:18px;
+  align-items:flex-start;
+  padding:18px 20px;
+}
+.conversation-pane__header-copy{
+  display:grid;
+  gap:8px;
+}
+.conversation-pane__header-copy h2{
+  margin:0;
+  font-size:28px;
+  line-height:1.06;
+}
+.conversation-pane__header-copy p{
+  margin:0;
+  max-width:720px;
+  line-height:1.58;
+}
+.conversation-pane__hero{
+  display:grid;
+  gap:16px;
+  padding:18px 20px;
+  background:
+    radial-gradient(circle at top left, rgba(255,255,255,0.94), rgba(255,255,255,0) 55%),
+    linear-gradient(135deg, rgba(36,54,74,0.06), rgba(160,106,44,0.10));
+}
+.conversation-pane__hero-topline{
+  display:flex;
+  justify-content:space-between;
+  gap:18px;
+  align-items:flex-start;
+}
+.conversation-pane__hero-topline h3{
+  margin:6px 0 0 0;
+  font-size:30px;
+  line-height:1.08;
+}
+.conversation-pane__hero-topline p{
+  margin:0;
+  max-width:360px;
+  line-height:1.6;
+}
+.conversation-pane__surface-row{
   display:grid;
   grid-template-columns:repeat(4, minmax(0, 1fr));
+  gap:12px;
+}
+.conversation-pane__starters-grid{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  gap:12px;
+}
+.prompt-card,
+.quick-entry-card{
+  border:1px solid rgba(20,32,43,0.08);
+  border-radius:16px;
+  padding:14px;
+  background:rgba(255,255,255,0.94);
+  text-align:left;
+  display:grid;
+  gap:8px;
+  transition:border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+.prompt-card strong,
+.quick-entry-card strong{
+  font-size:15px;
+  line-height:1.35;
+}
+.prompt-card p,
+.quick-entry-card p{
+  margin:0;
+  line-height:1.52;
+}
+.prompt-card:hover,
+.quick-entry-card:hover{
+  border-color:rgba(36,54,74,0.22);
+  box-shadow:0 14px 28px rgba(20,32,43,0.08);
+  transform:translateY(-1px);
+}
+.utility-launcher{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:10px;
+  padding:10px 14px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:rgba(255,255,255,0.66);
+}
+.utility-host{
+  display:grid;
+  gap:10px;
+  background:rgba(255,255,255,0.66);
+}
+.utility-host__header{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:flex-start;
+}
+.utility-host__header h3{margin:4px 0 0 0;}
+.utility-host__body{
+  border-top:1px solid var(--line);
+  padding-top:10px;
+}
+.panel--embedded{
+  margin:0;
+  border:none;
+  border-radius:0;
+  background:transparent;
+  box-shadow:none;
+  padding:0;
+}
+.conversation-pane__history-shell{
+  min-height:320px;
+  display:grid;
+  gap:12px;
+}
+.conversation-pane__history{
+  min-height:260px;
+  max-height:36vh;
+  overflow:auto;
+  border:1px solid rgba(20,32,43,0.08);
+  border-radius:18px;
+  background:linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.92));
+  padding:16px;
+}
+.conversation-pane__empty-state{
+  min-height:220px;
+  display:grid;
+  align-content:center;
   gap:10px;
 }
-.quick-entry-card{
-  border:1px solid var(--line);
-  border-radius:12px;
+.conversation-pane__empty-state h4{
+  margin:0;
+  font-size:22px;
+  line-height:1.24;
+}
+.queue--conversation{
+  gap:12px;
+}
+.queue__item--conversation{
+  max-width:min(78%, 760px);
+  padding:14px 16px;
+  border-radius:18px;
+}
+.queue__item--assistant{
+  background:linear-gradient(180deg, rgba(255,255,255,0.98), rgba(245,247,250,0.92));
+}
+.queue__item--user{
+  margin-left:auto;
+  background:linear-gradient(180deg, rgba(230,238,246,0.96), rgba(255,255,255,0.92));
+  border-color:rgba(36,54,74,0.20);
+}
+.quick-entry-card--active{
+  border-color:rgba(47,93,138,0.45);
+  background:rgba(228,237,245,0.92);
+}
+.canvas-overlay{
+  position:relative;
+  z-index:1;
+  min-height:360px;
+  max-height:58vh;
+  display:grid;
+  grid-template-rows:auto minmax(0, 1fr) auto;
+  gap:10px;
+  overflow:hidden;
+}
+.canvas-overlay__header{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:flex-start;
+}
+.canvas-overlay__context-strip{
+  display:grid;
+  gap:10px;
   padding:12px;
-  background:rgba(255,255,255,0.78);
-  text-align:center;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:rgba(244,246,250,0.92);
+}
+.canvas-overlay__context-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+  gap:10px;
+}
+.canvas-overlay__body{
+  min-height:260px;
+  overflow:auto;
+}
+.canvas-overlay__footer{
+  display:flex;
+  justify-content:flex-end;
+}
+.canvas-embedded{
+  margin:0;
+}
+.conversation-pane__composer{
+  position:sticky;
+  bottom:0;
+  z-index:3;
+  background:rgba(255,255,255,0.96);
+  padding:16px;
+  box-shadow:0 -14px 24px rgba(20,32,43,0.04);
+}
+.conversation-pane__composer textarea{
+  min-height:132px;
+}
+.conversation-pane__composer-actions{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:14px;
+  margin-top:10px;
+}
+.office-splitter--embedded,
+.office-chat--embedded{
+  display:none;
 }
 .context-block{
   border:1px solid var(--line);
   border-radius:12px;
   padding:10px;
   background:rgba(255,255,255,0.68);
+}
+.context-block__topline{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:flex-start;
 }
 .context-block__meta{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px;}
 .workspace-placeholder{
@@ -1452,6 +1853,47 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
   grid-column:3;
   grid-row:1;
 }
+.right-panel-surface{
+  background:linear-gradient(180deg, rgba(245,248,251,0.98), rgba(255,255,255,0.94));
+  border:1px solid rgba(15,23,42,0.10);
+  border-radius:22px;
+  box-shadow:var(--shadow);
+  position:sticky;
+  top:16px;
+  max-height:calc(100vh - 32px);
+  overflow:hidden;
+}
+.right-panel-surface__tabs{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+}
+.right-panel-surface__items{
+  overflow:auto;
+  padding-right:2px;
+}
+.right-panel-item{
+  border:1px solid rgba(20,32,43,0.08);
+  border-radius:16px;
+  padding:14px;
+  background:rgba(255,255,255,0.96);
+  display:grid;
+  gap:8px;
+}
+.right-panel-item strong{
+  font-size:14px;
+  line-height:1.42;
+}
+.right-panel-item p{
+  margin:0;
+  line-height:1.55;
+}
+.right-panel-item__meta{
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  align-items:center;
+}
 .workspace-placeholder--canvas{
   grid-column:2 / 4;
   grid-row:2;
@@ -1459,7 +1901,7 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
 
 @media (max-width: 1360px){
   .workspace-shell{grid-template-columns:280px minmax(0, 1fr);}
-  .left-rail,.conversation-pane,.workspace-placeholder--right,.workspace-placeholder--canvas{
+  .left-rail,.workspace-center-stack,.conversation-pane,.workspace-placeholder--right,.workspace-placeholder--canvas{
     grid-column:auto;
     grid-row:auto;
   }
@@ -1473,11 +1915,12 @@ input:focus,textarea:focus{border-color:rgba(47,93,138,0.55);box-shadow:0 0 0 4p
 
 @media (max-width: 1100px){
   .workspace-shell{grid-template-columns:1fr;}
-  .left-rail,.conversation-pane,.workspace-placeholder--right,.workspace-placeholder--canvas{
+  .left-rail,.workspace-center-stack,.conversation-pane,.workspace-placeholder--right,.workspace-placeholder--canvas{
     grid-column:auto;
     grid-row:auto;
   }
-  .quick-entry-grid{grid-template-columns:repeat(2, minmax(0, 1fr));}
+  .conversation-pane__surface-row,
+  .conversation-pane__starters-grid{grid-template-columns:repeat(2, minmax(0, 1fr));}
   .shell{grid-template-columns:1fr;}
   .shell__sidebar{
     position:static;

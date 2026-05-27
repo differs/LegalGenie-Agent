@@ -5,9 +5,7 @@ use axum::http::{Method, StatusCode};
 use legalminds_server::translation::{
     self, TranslationProvider, TranslationRequest, TranslationResult,
 };
-use legalminds_server::{
-    router, AppConfig, AppEnv, AppState, CorsOrigins, TranslationConfig,
-};
+use legalminds_server::{router, AppConfig, AppEnv, AppState, CorsOrigins, TranslationConfig};
 use serde_json::Value;
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use std::collections::{HashMap, VecDeque};
@@ -84,10 +82,7 @@ impl TranslationProvider for FakeTranslationProvider {
         self.model_name.as_deref()
     }
 
-    async fn translate(
-        &self,
-        request: TranslationRequest,
-    ) -> anyhow::Result<TranslationResult> {
+    async fn translate(&self, request: TranslationRequest) -> anyhow::Result<TranslationResult> {
         let _ = (
             request.evidence_id.as_str(),
             request.chunk_id.as_str(),
@@ -215,10 +210,10 @@ async fn translated_chunk_schema_is_available() {
 #[tokio::test]
 async fn parsing_auto_starts_translation() {
     let (app, _state, _tmp, pool, _provider) = build_test_app_with_fake_translation().await;
-    let (_user_id, token) = register_user(&app, "auto-translate", "auto-translate@example.com").await;
+    let (_user_id, token) =
+        register_user(&app, "auto-translate", "auto-translate@example.com").await;
     let case_id = create_case(&app, &token, "Auto Translation", "auto translation").await;
-    let evidence_id =
-        upload_text_file(&app, &token, &case_id, "note.txt", "Alpha\n\nBeta\n").await;
+    let evidence_id = upload_text_file(&app, &token, &case_id, "note.txt", "Alpha\n\nBeta\n").await;
 
     let detail = wait_for_file_parse_done(&app, &token, &evidence_id).await;
     assert_eq!(detail.0, StatusCode::OK);
@@ -372,11 +367,9 @@ async fn missing_provider_source_language_falls_back_to_heuristic() {
 #[tokio::test]
 async fn parsing_persists_chunk_source_fields() {
     let (app, _state, _tmp, pool, _provider) = build_test_app_with_disabled_translation().await;
-    let (_user_id, token) =
-        register_user(&app, "chunk-persist", "chunk-persist@example.com").await;
+    let (_user_id, token) = register_user(&app, "chunk-persist", "chunk-persist@example.com").await;
     let case_id = create_case(&app, &token, "Chunk Persist", "task 2 regression").await;
-    let evidence_id =
-        upload_text_file(&app, &token, &case_id, "note.txt", "Alpha\n\nBeta\n").await;
+    let evidence_id = upload_text_file(&app, &token, &case_id, "note.txt", "Alpha\n\nBeta\n").await;
 
     let detail = wait_for_file_parse_done(&app, &token, &evidence_id).await;
     assert_eq!(detail.0, StatusCode::OK);
@@ -418,7 +411,10 @@ async fn parsing_persists_chunk_source_fields() {
     .expect("fetch chunks");
 
     assert_eq!(chunk_rows.len(), 2);
-    assert_eq!(file_row.get::<i64, _>("chunk_count"), chunk_rows.len() as i64);
+    assert_eq!(
+        file_row.get::<i64, _>("chunk_count"),
+        chunk_rows.len() as i64
+    );
 
     for (expected_index, row) in chunk_rows.iter().enumerate() {
         let source_text = row.get::<String, _>("source_text");
@@ -488,8 +484,12 @@ async fn rapid_reparse_changes_parsed_at_generation_token() {
 #[tokio::test]
 async fn translation_failures_aggregate_to_partial_or_failed() {
     let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
-    let (_user_id, token) =
-        register_user(&app, "translation-failures", "translation-failures@example.com").await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-failures",
+        "translation-failures@example.com",
+    )
+    .await;
     let case_id = create_case(&app, &token, "Failures", "failure aggregation").await;
 
     provider.push_responses(
@@ -520,15 +520,16 @@ async fn translation_failures_aggregate_to_partial_or_failed() {
     .await
     .expect("fetch partial file");
 
-    assert_eq!(partial_file.get::<String, _>("translation_status"), "partial");
+    assert_eq!(
+        partial_file.get::<String, _>("translation_status"),
+        "partial"
+    );
     assert_eq!(partial_file.get::<i64, _>("translated_chunk_count"), 1);
     assert_eq!(partial_file.get::<i64, _>("failed_chunk_count"), 1);
-    assert!(
-        partial_file
-            .get::<Option<String>, _>("translation_error")
-            .unwrap_or_default()
-            .contains("fake provider failed alpha")
-    );
+    assert!(partial_file
+        .get::<Option<String>, _>("translation_error")
+        .unwrap_or_default()
+        .contains("fake provider failed alpha"));
 
     let partial_failed_chunk = sqlx::query(
         r#"
@@ -552,17 +553,13 @@ async fn translation_failures_aggregate_to_partial_or_failed() {
         "failed"
     );
     assert_eq!(partial_failed_chunk.get::<i64, _>("retry_count"), 1);
-    assert!(
-        partial_failed_chunk
-            .get::<Option<String>, _>("next_retry_at")
-            .is_some()
-    );
-    assert!(
-        partial_failed_chunk
-            .get::<Option<String>, _>("translation_error")
-            .unwrap_or_default()
-            .contains("fake provider failed alpha")
-    );
+    assert!(partial_failed_chunk
+        .get::<Option<String>, _>("next_retry_at")
+        .is_some());
+    assert!(partial_failed_chunk
+        .get::<Option<String>, _>("translation_error")
+        .unwrap_or_default()
+        .contains("fake provider failed alpha"));
 
     provider.push_responses(
         "Gamma",
@@ -594,12 +591,10 @@ async fn translation_failures_aggregate_to_partial_or_failed() {
     assert_eq!(failed_file.get::<String, _>("translation_status"), "failed");
     assert_eq!(failed_file.get::<i64, _>("translated_chunk_count"), 0);
     assert_eq!(failed_file.get::<i64, _>("failed_chunk_count"), 1);
-    assert!(
-        failed_file
-            .get::<Option<String>, _>("translation_error")
-            .unwrap_or_default()
-            .contains("fake provider failed gamma")
-    );
+    assert!(failed_file
+        .get::<Option<String>, _>("translation_error")
+        .unwrap_or_default()
+        .contains("fake provider failed gamma"));
 }
 
 #[tokio::test]
@@ -645,8 +640,7 @@ async fn pending_or_processing_chunks_keep_file_status_processing() {
     .await;
     wait_for_file_parse_done(&app, &token, &evidence_id).await;
 
-    let processing_row =
-        wait_for_processing_mixed_file_state(&pool, &evidence_id, 1, 1).await;
+    let processing_row = wait_for_processing_mixed_file_state(&pool, &evidence_id, 1, 1).await;
     assert_eq!(
         processing_row.get::<String, _>("translation_status"),
         "processing"
@@ -813,7 +807,10 @@ async fn file_detail_and_chunk_endpoints_expose_translation_state() {
     assert_eq!(upload.0, StatusCode::OK);
 
     let upload_data = &upload.1["data"];
-    let evidence_id = upload_data["id"].as_str().expect("upload file id").to_string();
+    let evidence_id = upload_data["id"]
+        .as_str()
+        .expect("upload file id")
+        .to_string();
     assert_eq!(upload_data["translation_status"].as_str(), Some("pending"));
     assert!(upload_data["translation_error"].is_null());
     assert!(upload_data["source_language"].is_null());
@@ -883,7 +880,10 @@ async fn file_detail_and_chunk_endpoints_expose_translation_state() {
     assert_eq!(source_chunks.1["data"]["total"].as_i64(), Some(2));
     assert_eq!(source_chunks.1["data"]["page"].as_i64(), Some(1));
     assert_eq!(source_chunks.1["data"]["page_size"].as_i64(), Some(1));
-    assert_eq!(source_chunks.1["data"]["view_mode"].as_str(), Some("source"));
+    assert_eq!(
+        source_chunks.1["data"]["view_mode"].as_str(),
+        Some("source")
+    );
     let first_chunk = &source_chunks.1["data"]["items"][0];
     assert_eq!(first_chunk["chunk_index"].as_i64(), Some(0));
     assert_eq!(first_chunk["source_text"].as_str(), Some("Alpha"));
@@ -903,7 +903,10 @@ async fn file_detail_and_chunk_endpoints_expose_translation_state() {
     )
     .await;
     assert_eq!(translated_chunks.0, StatusCode::OK);
-    assert_eq!(translated_chunks.1["data"]["view_mode"].as_str(), Some("zh"));
+    assert_eq!(
+        translated_chunks.1["data"]["view_mode"].as_str(),
+        Some("zh")
+    );
     let second_chunk = &translated_chunks.1["data"]["items"][0];
     assert_eq!(second_chunk["chunk_index"].as_i64(), Some(1));
     assert!(second_chunk["source_text"].is_null());
@@ -918,7 +921,10 @@ async fn file_detail_and_chunk_endpoints_expose_translation_state() {
     )
     .await;
     assert_eq!(bilingual_chunks.0, StatusCode::OK);
-    assert_eq!(bilingual_chunks.1["data"]["items"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        bilingual_chunks.1["data"]["items"].as_array().map(Vec::len),
+        Some(2)
+    );
     assert_eq!(
         bilingual_chunks.1["data"]["items"][0]["source_text"].as_str(),
         Some("Alpha")
@@ -944,6 +950,475 @@ async fn file_detail_and_chunk_endpoints_expose_translation_state() {
     assert_eq!(listed["translated_chunk_count"].as_i64(), Some(2));
     assert_eq!(listed["failed_chunk_count"].as_i64(), Some(0));
     assert_eq!(listed["translation_incomplete"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn evidence_search_supports_zh_source_and_bilingual_modes() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-search-modes",
+        "translation-search-modes@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Search Modes", "evidence search modes").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "阿尔法证据".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+    provider.push_responses(
+        "Beta",
+        [FakeProviderResponse::Success {
+            translated_text: "贝塔证据".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "modes.txt", "Alpha\n\nBeta\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    let source = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=Alpha&case_id={case_id}&language_mode=source"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(source.0, StatusCode::OK);
+    let source_hit = find_evidence_result(&source.1["data"]["results"], &evidence_id);
+    assert_eq!(source_hit["language_mode"].as_str(), Some("source"));
+    assert_eq!(source_hit["matched_language"].as_str(), Some("source"));
+    assert_eq!(source_hit["source_fallback"].as_bool(), Some(false));
+    assert_eq!(source_hit["translation_incomplete"].as_bool(), Some(false));
+    assert_eq!(source_hit["file_id"].as_str(), Some(evidence_id.as_str()));
+    assert_eq!(source_hit["file_name"].as_str(), Some("modes.txt"));
+    assert!(source_hit["chunk_id"].is_string());
+    assert_eq!(source_hit["chunk_index"].as_i64(), Some(0));
+    assert!(source_hit["display_label"].as_str().unwrap_or("").len() > 0);
+    assert!(source_hit["anchor_json"].is_object());
+    assert_eq!(source_hit["snippet_source"].as_str(), Some("Alpha"));
+    assert_eq!(
+        source_hit["snippet_translated"].as_str(),
+        Some("阿尔法证据")
+    );
+    assert_eq!(source_hit["match_start_offset"].as_i64(), Some(0));
+    assert_eq!(source_hit["match_end_offset"].as_i64(), Some(5));
+
+    let zh = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=阿尔法&case_id={case_id}&language_mode=zh"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(zh.0, StatusCode::OK);
+    let zh_hit = find_evidence_result(&zh.1["data"]["results"], &evidence_id);
+    assert_eq!(zh_hit["language_mode"].as_str(), Some("zh"));
+    assert_eq!(zh_hit["matched_language"].as_str(), Some("translated"));
+    assert_eq!(zh_hit["source_fallback"].as_bool(), Some(false));
+    assert_eq!(zh_hit["translation_incomplete"].as_bool(), Some(false));
+    assert_eq!(zh_hit["snippet_source"].as_str(), Some("Alpha"));
+    assert_eq!(zh_hit["snippet_translated"].as_str(), Some("阿尔法证据"));
+    assert_eq!(zh_hit["match_start_offset"].as_i64(), Some(0));
+    assert_eq!(zh_hit["match_end_offset"].as_i64(), Some(3));
+
+    let bilingual = request_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/api/v1/search/evidence?keyword=阿尔法&case_id={case_id}&language_mode=bilingual"
+        ),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(bilingual.0, StatusCode::OK);
+    let bilingual_hit = find_evidence_result(&bilingual.1["data"]["results"], &evidence_id);
+    assert_eq!(bilingual_hit["language_mode"].as_str(), Some("bilingual"));
+    assert_eq!(
+        bilingual_hit["matched_language"].as_str(),
+        Some("translated")
+    );
+    assert_eq!(bilingual_hit["source_fallback"].as_bool(), Some(false));
+    assert_eq!(bilingual_hit["snippet_source"].as_str(), Some("Alpha"));
+    assert_eq!(
+        bilingual_hit["snippet_translated"].as_str(),
+        Some("阿尔法证据")
+    );
+}
+
+#[tokio::test]
+async fn global_search_accepts_language_mode_for_evidence_hits() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-global-search",
+        "translation-global-search@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Global Search", "language mode passthrough").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "阿尔法法庭记录".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+
+    let evidence_id = upload_text_file(&app, &token, &case_id, "global.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    let search = request_json(
+        &app,
+        Method::GET,
+        "/api/v1/search?keyword=阿尔法&language_mode=zh",
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(search.0, StatusCode::OK);
+
+    let hit = find_evidence_result(&search.1["data"]["results"], &evidence_id);
+    assert_eq!(hit["object_type"].as_str(), Some("evidence"));
+    assert_eq!(hit["language_mode"].as_str(), Some("zh"));
+    assert_eq!(hit["matched_language"].as_str(), Some("translated"));
+    assert_eq!(hit["source_fallback"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn evidence_search_defaults_to_zh_mode() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-search-default-zh",
+        "translation-search-default-zh@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Default Zh", "default zh search mode").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "阿尔法默认搜索".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+
+    let evidence_id = upload_text_file(&app, &token, &case_id, "default-zh.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    let search = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=阿尔法&case_id={case_id}"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(search.0, StatusCode::OK);
+    let hit = find_evidence_result(&search.1["data"]["results"], &evidence_id);
+    assert_eq!(hit["language_mode"].as_str(), Some("zh"));
+    assert_eq!(hit["matched_language"].as_str(), Some("translated"));
+    assert_eq!(hit["source_fallback"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn evidence_search_bilingual_total_dedupes_same_chunk() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-search-bilingual-total",
+        "translation-search-bilingual-total@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Bilingual Total", "dedupe same chunk").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "Alpha 中文".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+
+    let evidence_id = upload_text_file(&app, &token, &case_id, "dedupe.txt", "Alpha\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    let bilingual = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=Alpha&case_id={case_id}&language_mode=bilingual"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(bilingual.0, StatusCode::OK);
+    assert_eq!(bilingual.1["data"]["total"].as_i64(), Some(1));
+    assert_eq!(
+        bilingual.1["data"]["results"].as_array().map(Vec::len),
+        Some(1)
+    );
+    let hit = find_evidence_result(&bilingual.1["data"]["results"], &evidence_id);
+    assert_eq!(hit["language_mode"].as_str(), Some("bilingual"));
+    assert_eq!(hit["matched_language"].as_str(), Some("translated"));
+}
+
+#[tokio::test]
+async fn evidence_search_matches_file_name_for_chunked_files() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-search-filename",
+        "translation-search-filename@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Filename Search", "file name search").await;
+
+    provider.push_responses(
+        "Alpha evidence body",
+        [FakeProviderResponse::Success {
+            translated_text: "阿尔法正文".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+
+    let evidence_id = upload_text_file(
+        &app,
+        &token,
+        &case_id,
+        "invoice-2026-bridge.txt",
+        "Alpha evidence body\n",
+    )
+    .await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
+
+    let search = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=invoice-2026&case_id={case_id}"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(search.0, StatusCode::OK);
+    let hit = find_evidence_result(&search.1["data"]["results"], &evidence_id);
+    assert_eq!(hit["file_name"].as_str(), Some("invoice-2026-bridge.txt"));
+    assert_eq!(hit["source_fallback"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn evidence_search_legacy_files_fall_back_to_parsed_text_for_source_and_bilingual() {
+    let (app, _state, _tmp, pool, _provider) = build_test_app_with_disabled_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-legacy-fallback",
+        "translation-legacy-fallback@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Legacy Fallback", "legacy parsed_text search").await;
+
+    let evidence_id = upload_text_file(
+        &app,
+        &token,
+        &case_id,
+        "legacy.txt",
+        "Legacy Alpha evidence line\n",
+    )
+    .await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+
+    sqlx::query(
+        r#"
+        UPDATE evidence_files
+        SET chunk_count = 0,
+            translated_chunk_count = 0,
+            failed_chunk_count = 0
+        WHERE id = ?1
+        "#,
+    )
+    .bind(&evidence_id)
+    .execute(&pool)
+    .await
+    .expect("reset chunk counters for legacy fallback");
+    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
+        .bind(&evidence_id)
+        .execute(&pool)
+        .await
+        .expect("delete chunks for legacy fallback");
+
+    let source = request_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/api/v1/search/evidence?keyword=Legacy%20Alpha&case_id={case_id}&language_mode=source"
+        ),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(source.0, StatusCode::OK);
+    let source_hit = find_evidence_result(&source.1["data"]["results"], &evidence_id);
+    assert_eq!(source_hit["language_mode"].as_str(), Some("source"));
+    assert_eq!(source_hit["source_fallback"].as_bool(), Some(true));
+    assert_eq!(source_hit["matched_language"].as_str(), Some("source"));
+    assert_eq!(source_hit["translation_incomplete"].as_bool(), Some(true));
+    assert!(source_hit.get("chunk_id").is_some());
+    assert!(source_hit.get("chunk_index").is_some());
+    assert!(source_hit.get("snippet_translated").is_some());
+    assert!(source_hit["chunk_id"].is_null());
+    assert!(source_hit["chunk_index"].is_null());
+
+    let bilingual = request_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/api/v1/search/evidence?keyword=Legacy%20Alpha&case_id={case_id}&language_mode=bilingual"
+        ),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(bilingual.0, StatusCode::OK);
+    let bilingual_hit = find_evidence_result(&bilingual.1["data"]["results"], &evidence_id);
+    assert_eq!(bilingual_hit["language_mode"].as_str(), Some("bilingual"));
+    assert_eq!(bilingual_hit["source_fallback"].as_bool(), Some(true));
+    assert_eq!(bilingual_hit["matched_language"].as_str(), Some("source"));
+}
+
+#[tokio::test]
+async fn evidence_search_legacy_files_fall_back_to_parsed_text_for_zh() {
+    let (app, _state, _tmp, pool, _provider) = build_test_app_with_disabled_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-legacy-zh-fallback",
+        "translation-legacy-zh-fallback@example.com",
+    )
+    .await;
+    let case_id = create_case(
+        &app,
+        &token,
+        "Legacy Zh Fallback",
+        "legacy zh parsed_text search",
+    )
+    .await;
+
+    let evidence_id = upload_text_file(
+        &app,
+        &token,
+        &case_id,
+        "legacy-zh.txt",
+        "Legacy source text\n",
+    )
+    .await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+
+    sqlx::query(
+        r#"
+        UPDATE evidence_files
+        SET chunk_count = 0,
+            translated_chunk_count = 0,
+            failed_chunk_count = 0
+        WHERE id = ?1
+        "#,
+    )
+    .bind(&evidence_id)
+    .execute(&pool)
+    .await
+    .expect("reset chunk counters for legacy zh fallback");
+    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
+        .bind(&evidence_id)
+        .execute(&pool)
+        .await
+        .expect("delete chunks for legacy zh fallback");
+
+    let zh = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=Legacy&case_id={case_id}&language_mode=zh"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(zh.0, StatusCode::OK);
+    let zh_hit = find_evidence_result(&zh.1["data"]["results"], &evidence_id);
+    assert_eq!(zh_hit["language_mode"].as_str(), Some("zh"));
+    assert_eq!(zh_hit["matched_language"].as_str(), Some("source"));
+    assert_eq!(zh_hit["source_fallback"].as_bool(), Some(true));
+    assert_eq!(zh_hit["translation_incomplete"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn evidence_search_zh_marks_translation_incomplete_without_source_fallback() {
+    let (app, _state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (_user_id, token) = register_user(
+        &app,
+        "translation-search-incomplete",
+        "translation-search-incomplete@example.com",
+    )
+    .await;
+    let case_id = create_case(&app, &token, "Incomplete Zh", "partial translation search").await;
+
+    provider.push_responses(
+        "Alpha",
+        [FakeProviderResponse::Success {
+            translated_text: "阿尔法已翻译".to_string(),
+            source_language: Some("en".to_string()),
+        }],
+    );
+    provider.push_responses(
+        "Beta",
+        [FakeProviderResponse::Failure {
+            message: "beta translation failed".to_string(),
+        }],
+    );
+
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "partial.txt", "Alpha\n\nBeta\n").await;
+    wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
+
+    let zh = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=阿尔法&case_id={case_id}&language_mode=zh"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(zh.0, StatusCode::OK);
+    let zh_hit = find_evidence_result(&zh.1["data"]["results"], &evidence_id);
+    assert_eq!(zh_hit["language_mode"].as_str(), Some("zh"));
+    assert_eq!(zh_hit["matched_language"].as_str(), Some("translated"));
+    assert_eq!(zh_hit["translation_incomplete"].as_bool(), Some(true));
+    assert_eq!(zh_hit["source_fallback"].as_bool(), Some(false));
+
+    let no_source_fallback = request_json(
+        &app,
+        Method::GET,
+        &format!("/api/v1/search/evidence?keyword=Beta&case_id={case_id}&language_mode=zh"),
+        Some(&token),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(no_source_fallback.0, StatusCode::OK);
+    assert!(
+        find_optional_evidence_result(&no_source_fallback.1["data"]["results"], &evidence_id)
+            .is_none(),
+        "zh mode should not fall back to source text when translation is incomplete"
+    );
 }
 
 #[tokio::test]
@@ -1011,7 +1486,8 @@ async fn retry_selected_requires_chunk_ids() {
         }],
     );
 
-    let evidence_id = upload_text_file(&app, &token, &case_id, "retry-selected.txt", "Alpha\n").await;
+    let evidence_id =
+        upload_text_file(&app, &token, &case_id, "retry-selected.txt", "Alpha\n").await;
     wait_for_file_parse_done(&app, &token, &evidence_id).await;
     wait_for_file_translation_status(&pool, &evidence_id, &["failed", "partial"]).await;
 
@@ -1079,10 +1555,7 @@ async fn retry_all_and_selected_skip_done_chunks_without_overwriting_text() {
 
     let alpha_id = chunk_rows[0].get::<String, _>("id");
     let beta_id = chunk_rows[1].get::<String, _>("id");
-    assert_eq!(
-        chunk_rows[0].get::<String, _>("translation_status"),
-        "done"
-    );
+    assert_eq!(chunk_rows[0].get::<String, _>("translation_status"), "done");
     assert_eq!(
         chunk_rows[1].get::<String, _>("translation_status"),
         "failed"
@@ -1108,11 +1581,15 @@ async fn retry_all_and_selected_skip_done_chunks_without_overwriting_text() {
 
     wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
     assert_eq!(
-        chunk_translation_text(&pool, &evidence_id, "Alpha").await.as_deref(),
+        chunk_translation_text(&pool, &evidence_id, "Alpha")
+            .await
+            .as_deref(),
         Some("ZH::Alpha::first")
     );
     assert_eq!(
-        chunk_translation_text(&pool, &evidence_id, "Beta").await.as_deref(),
+        chunk_translation_text(&pool, &evidence_id, "Beta")
+            .await
+            .as_deref(),
         Some("ZH::Beta::retry")
     );
     assert_eq!(provider.call_count("Alpha"), 1);
@@ -1135,11 +1612,15 @@ async fn retry_all_and_selected_skip_done_chunks_without_overwriting_text() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        chunk_translation_text(&pool, &evidence_id, "Alpha").await.as_deref(),
+        chunk_translation_text(&pool, &evidence_id, "Alpha")
+            .await
+            .as_deref(),
         Some("ZH::Alpha::first")
     );
     assert_eq!(
-        chunk_translation_text(&pool, &evidence_id, "Beta").await.as_deref(),
+        chunk_translation_text(&pool, &evidence_id, "Beta")
+            .await
+            .as_deref(),
         Some("ZH::Beta::retry")
     );
     assert_eq!(provider.call_count("Alpha"), 1);
@@ -1206,7 +1687,9 @@ async fn retry_skips_processing_chunk_without_resetting_active_attempt() {
     notify.notify_waiters();
     wait_for_file_translation_status(&pool, &evidence_id, &["done"]).await;
     assert_eq!(
-        chunk_translation_text(&pool, &evidence_id, "Alpha").await.as_deref(),
+        chunk_translation_text(&pool, &evidence_id, "Alpha")
+            .await
+            .as_deref(),
         Some("ZH::Alpha::processing")
     );
     assert_eq!(provider.call_count("Alpha"), 1);
@@ -1321,8 +1804,8 @@ async fn stale_processing_consumes_retry_budget() {
             .await
             .expect("run stale budget cycle");
 
-        let row = wait_for_chunk_retry_count(&pool, &evidence_id, "Alpha", expected_retry_count)
-            .await;
+        let row =
+            wait_for_chunk_retry_count(&pool, &evidence_id, "Alpha", expected_retry_count).await;
         assert_eq!(row.get::<String, _>("translation_status"), "pending");
         assert!(
             row.get::<Option<String>, _>("next_retry_at").is_some(),
@@ -1350,7 +1833,10 @@ async fn stale_processing_consumes_retry_budget() {
         .expect("run extra idle retry cycle");
     tokio::time::sleep(Duration::from_millis(100)).await;
     let still_terminal = fetch_chunk_state(&pool, &evidence_id, "Alpha").await;
-    assert_eq!(still_terminal.get::<String, _>("translation_status"), "failed");
+    assert_eq!(
+        still_terminal.get::<String, _>("translation_status"),
+        "failed"
+    );
     assert_eq!(still_terminal.get::<i64, _>("retry_count"), 4);
 
     notify.notify_waiters();
@@ -1377,8 +1863,7 @@ async fn retry_does_not_drift_locked_provider_or_model() {
         }],
     );
 
-    let evidence_id =
-        upload_text_file(&app, &token, &case_id, "lock.txt", "Alpha\n\nBeta\n").await;
+    let evidence_id = upload_text_file(&app, &token, &case_id, "lock.txt", "Alpha\n\nBeta\n").await;
     wait_for_file_parse_done(&app, &token, &evidence_id).await;
     wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
 
@@ -1430,12 +1915,10 @@ async fn retry_does_not_drift_locked_provider_or_model() {
         file_row.get::<Option<String>, _>("translation_model"),
         Some("fake-legal-v1".to_string())
     );
-    assert!(
-        file_row
-            .get::<Option<String>, _>("translation_error")
-            .unwrap_or_default()
-            .contains("provider/model mismatch")
-    );
+    assert!(file_row
+        .get::<Option<String>, _>("translation_error")
+        .unwrap_or_default()
+        .contains("provider/model mismatch"));
     assert_eq!(file_row.get::<String, _>("translation_status"), "partial");
 
     let failed_chunk = sqlx::query(
@@ -1454,18 +1937,24 @@ async fn retry_does_not_drift_locked_provider_or_model() {
     .await
     .expect("fetch locked failed chunk");
 
-    assert_eq!(failed_chunk.get::<String, _>("translation_status"), "failed");
-    assert_eq!(failed_chunk.get::<Option<String>, _>("next_retry_at"), None);
-    assert!(
-        failed_chunk
-            .get::<Option<String>, _>("translation_error")
-            .unwrap_or_default()
-            .contains("provider/model mismatch")
+    assert_eq!(
+        failed_chunk.get::<String, _>("translation_status"),
+        "failed"
     );
+    assert_eq!(failed_chunk.get::<Option<String>, _>("next_retry_at"), None);
+    assert!(failed_chunk
+        .get::<Option<String>, _>("translation_error")
+        .unwrap_or_default()
+        .contains("provider/model mismatch"));
 }
 
-async fn build_test_app_with_fake_translation(
-) -> (axum::Router, AppState, TempDir, SqlitePool, FakeTranslationProvider) {
+async fn build_test_app_with_fake_translation() -> (
+    axum::Router,
+    AppState,
+    TempDir,
+    SqlitePool,
+    FakeTranslationProvider,
+) {
     build_test_app_with_named_translation(
         FakeTranslationProvider::new("fake", Some("fake-legal-v1")),
         TranslationConfig {
@@ -1483,7 +1972,13 @@ async fn build_test_app_with_fake_translation(
 
 async fn build_test_app_with_fake_translation_concurrency(
     max_concurrency: u16,
-) -> (axum::Router, AppState, TempDir, SqlitePool, FakeTranslationProvider) {
+) -> (
+    axum::Router,
+    AppState,
+    TempDir,
+    SqlitePool,
+    FakeTranslationProvider,
+) {
     build_test_app_with_named_translation(
         FakeTranslationProvider::new("fake", Some("fake-legal-v1")),
         TranslationConfig {
@@ -1499,8 +1994,13 @@ async fn build_test_app_with_fake_translation_concurrency(
     .await
 }
 
-async fn build_test_app_with_disabled_translation(
-) -> (axum::Router, AppState, TempDir, SqlitePool, FakeTranslationProvider) {
+async fn build_test_app_with_disabled_translation() -> (
+    axum::Router,
+    AppState,
+    TempDir,
+    SqlitePool,
+    FakeTranslationProvider,
+) {
     build_test_app_with_named_translation(
         FakeTranslationProvider::new("disabled", None),
         TranslationConfig {
@@ -1519,7 +2019,13 @@ async fn build_test_app_with_disabled_translation(
 async fn build_test_app_with_named_translation(
     provider: FakeTranslationProvider,
     translation: TranslationConfig,
-) -> (axum::Router, AppState, TempDir, SqlitePool, FakeTranslationProvider) {
+) -> (
+    axum::Router,
+    AppState,
+    TempDir,
+    SqlitePool,
+    FakeTranslationProvider,
+) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -1577,12 +2083,8 @@ async fn build_test_app_with_named_translation(
         asr_threads: 1,
     };
 
-    let state = AppState::new_with_translation_provider(
-        cfg,
-        pool,
-        translation,
-        Arc::new(provider.clone()),
-    );
+    let state =
+        AppState::new_with_translation_provider(cfg, pool, translation, Arc::new(provider.clone()));
     let pool = state.pool.clone();
     let app = router(state.clone());
     (app, state, tmp, pool, provider)
@@ -1754,7 +2256,11 @@ async fn wait_for_chunk_retry_count(
     );
 }
 
-fn assert_retry_delay_in_minutes(next_retry_at: Option<String>, min_minutes: i64, max_minutes: i64) {
+fn assert_retry_delay_in_minutes(
+    next_retry_at: Option<String>,
+    min_minutes: i64,
+    max_minutes: i64,
+) {
     let next_retry_at = next_retry_at.expect("next_retry_at should exist");
     let parsed = chrono::NaiveDateTime::parse_from_str(&next_retry_at, "%Y-%m-%d %H:%M:%S")
         .expect("parse next_retry_at");
@@ -1777,15 +2283,14 @@ fn local_source_text_hash(text: &str) -> String {
 
 async fn wait_for_file_translation_error(pool: &SqlitePool, evidence_id: &str, needle: &str) {
     for _ in 0..100 {
-        let error = sqlx::query(
-            "SELECT translation_error FROM evidence_files WHERE id = ?1 LIMIT 1",
-        )
-        .bind(evidence_id)
-        .fetch_one(pool)
-        .await
-        .expect("fetch translation_error")
-        .get::<Option<String>, _>("translation_error")
-        .unwrap_or_default();
+        let error =
+            sqlx::query("SELECT translation_error FROM evidence_files WHERE id = ?1 LIMIT 1")
+                .bind(evidence_id)
+                .fetch_one(pool)
+                .await
+                .expect("fetch translation_error")
+                .get::<Option<String>, _>("translation_error")
+                .unwrap_or_default();
 
         if error.contains(needle) {
             return;
@@ -1820,9 +2325,7 @@ async fn wait_for_chunk_status(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    panic!(
-        "chunk {source_text} in file {evidence_id} did not reach status={expected_status}"
-    );
+    panic!("chunk {source_text} in file {evidence_id} did not reach status={expected_status}");
 }
 
 async fn fetch_chunk_state(
@@ -1878,4 +2381,22 @@ async fn force_failed_or_pending_chunk_due_now(pool: &SqlitePool, evidence_id: &
     .execute(pool)
     .await
     .expect("force chunk due now");
+}
+
+fn find_evidence_result<'a>(results: &'a Value, evidence_id: &str) -> &'a Value {
+    find_optional_evidence_result(results, evidence_id)
+        .unwrap_or_else(|| panic!("expected evidence result for {evidence_id}: {results}"))
+}
+
+fn find_optional_evidence_result<'a>(results: &'a Value, evidence_id: &str) -> Option<&'a Value> {
+    results.as_array().and_then(|items| {
+        items.iter().find(|item| {
+            item.get("object_type").and_then(Value::as_str) == Some("evidence")
+                && item
+                    .get("file_id")
+                    .or_else(|| item.get("object_id"))
+                    .and_then(Value::as_str)
+                    == Some(evidence_id)
+        })
+    })
 }

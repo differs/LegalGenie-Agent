@@ -2,7 +2,8 @@ use crate::{api, models, AppCtx};
 use dioxus::prelude::*;
 
 #[component]
-pub fn ExportsPage() -> Element {
+pub fn ExportsPage(embedded: Option<bool>) -> Element {
+    let embedded = embedded.unwrap_or(false);
     let ctx = use_context::<AppCtx>();
 
     let mut start_date = use_signal(String::new);
@@ -120,10 +121,12 @@ pub fn ExportsPage() -> Element {
     };
 
     rsx! {
-        section { class: "panel",
-            header { class: "panel__head",
-                h2 { "Exports" }
-                p { class: "muted", "Generate exports, browse history, download records." }
+        section { class: if embedded { "panel canvas-embedded" } else { "panel" },
+            if !embedded {
+                header { class: "panel__head",
+                    h2 { "Exports" }
+                    p { class: "muted", "Generate exports, browse history, download records." }
+                }
             }
 
             div { class: "grid",

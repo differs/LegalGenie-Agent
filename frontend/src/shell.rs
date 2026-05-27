@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Brief,
@@ -9,17 +10,6 @@ pub enum Tab {
     Exports,
     Logs,
 }
-
-pub const ALL_TABS: [Tab; 8] = [
-    Tab::Brief,
-    Tab::Cases,
-    Tab::Timeline,
-    Tab::Files,
-    Tab::Persons,
-    Tab::Search,
-    Tab::Exports,
-    Tab::Logs,
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthGate {
@@ -133,6 +123,55 @@ pub struct InsertedContext {
     pub expanded: bool,
 }
 
+pub fn submit_local_conversation_message(
+    conversation_items: &mut Vec<String>,
+    draft: &mut String,
+) -> bool {
+    let message = draft.trim();
+    if message.is_empty() {
+        return false;
+    }
+    conversation_items.push(message.to_string());
+    draft.clear();
+    true
+}
+
+pub fn insert_selected_object(
+    selected: &Option<SelectedObject>,
+    inserted_contexts: &mut Vec<InsertedContext>,
+) -> bool {
+    let Some(selected) = selected else {
+        return false;
+    };
+    if inserted_contexts.iter().any(|item| item.id == selected.id) {
+        return false;
+    }
+    inserted_contexts.push(InsertedContext {
+        id: selected.id.clone(),
+        kind: selected.kind,
+        title: selected.title.clone(),
+        expanded: false,
+    });
+    true
+}
+
+pub fn toggle_inserted_context_expanded(
+    inserted_contexts: &mut [InsertedContext],
+    id: &str,
+) -> bool {
+    let Some(context) = inserted_contexts.iter_mut().find(|item| item.id == id) else {
+        return false;
+    };
+    context.expanded = !context.expanded;
+    true
+}
+
+pub fn remove_inserted_context(inserted_contexts: &mut Vec<InsertedContext>, id: &str) -> bool {
+    let original_len = inserted_contexts.len();
+    inserted_contexts.retain(|item| item.id != id);
+    inserted_contexts.len() != original_len
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuggestedAction {
     pub title: String,
@@ -161,6 +200,40 @@ impl Default for RightPanelState {
             mode: PanelMode::Expanded,
         }
     }
+}
+
+pub fn default_right_panel_state() -> RightPanelState {
+    RightPanelState::default()
+}
+
+pub fn switch_right_panel_tab(mut state: RightPanelState, tab: RightPanelTab) -> RightPanelState {
+    state.tab = tab;
+    if state.mode == PanelMode::Collapsed {
+        state.mode = PanelMode::Expanded;
+    }
+    state
+}
+
+pub fn collapse_right_panel(mut state: RightPanelState) -> RightPanelState {
+    if matches!(state.mode, PanelMode::Expanded | PanelMode::Pinned) {
+        state.mode = PanelMode::Collapsed;
+    }
+    state
+}
+
+pub fn expand_right_panel(mut state: RightPanelState) -> RightPanelState {
+    if state.mode == PanelMode::Collapsed {
+        state.mode = PanelMode::Expanded;
+    }
+    state
+}
+
+pub fn toggle_right_panel_pin(mut state: RightPanelState) -> RightPanelState {
+    state.mode = match state.mode {
+        PanelMode::Pinned => PanelMode::Expanded,
+        PanelMode::Expanded | PanelMode::Collapsed => PanelMode::Pinned,
+    };
+    state
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -223,11 +296,25 @@ impl WorkspaceState {
     }
 
     pub fn toggle_panel_collapsed(mut self) -> Self {
-        self.right_panel.mode = match self.right_panel.mode {
-            PanelMode::Collapsed => PanelMode::Expanded,
-            PanelMode::Expanded => PanelMode::Collapsed,
-            PanelMode::Pinned => PanelMode::Pinned,
+        self.right_panel = match self.right_panel.mode {
+            PanelMode::Collapsed => expand_right_panel(self.right_panel),
+            PanelMode::Expanded | PanelMode::Pinned => collapse_right_panel(self.right_panel),
         };
+        self
+    }
+
+    pub fn switch_right_panel_tab(mut self, tab: RightPanelTab) -> Self {
+        self.right_panel = switch_right_panel_tab(self.right_panel, tab);
+        self
+    }
+
+    pub fn collapse_right_panel(mut self) -> Self {
+        self.right_panel = collapse_right_panel(self.right_panel);
+        self
+    }
+
+    pub fn expand_right_panel(mut self) -> Self {
+        self.right_panel = expand_right_panel(self.right_panel);
         self
     }
 
@@ -273,32 +360,6 @@ impl WorkspaceState {
     pub fn close_canvas(mut self) -> Self {
         self.canvas = None;
         self
-    }
-}
-
-pub fn tab_label(tab: Tab) -> &'static str {
-    match tab {
-        Tab::Brief => "Brief",
-        Tab::Cases => "Cases",
-        Tab::Timeline => "Timeline",
-        Tab::Files => "Evidence",
-        Tab::Persons => "Persons",
-        Tab::Search => "Search",
-        Tab::Exports => "Exports",
-        Tab::Logs => "Logs",
-    }
-}
-
-pub fn tab_description(tab: Tab) -> &'static str {
-    match tab {
-        Tab::Brief => "AI 主驾驶入口，先看案件简报、风险和建议动作。",
-        Tab::Cases => "创建、选择和切换案件上下文。",
-        Tab::Timeline => "围绕时间轴梳理事实、节点和证据链接。",
-        Tab::Files => "审阅证据文件、解析状态和下载入口。",
-        Tab::Persons => "维护人物画像、关系和跨案关联。",
-        Tab::Search => "在案件内搜索并沉淀为可执行线索。",
-        Tab::Exports => "把案件材料整理为导出草案和正式交付物。",
-        Tab::Logs => "审计 AI 执行记录、确认链和操作回执。",
     }
 }
 
@@ -368,7 +429,7 @@ pub fn build_shell_brief(_state: &ShellState) -> ShellBrief {
     if !state.signed_in {
         return ShellBrief {
             eyebrow: "Connection".to_string(),
-            title: "连接到 LegalMinds".to_string(),
+            title: "连接到 LegalGenie Agent".to_string(),
             summary: "先登录或粘贴访问令牌，再让 AI 接管当前案件的时间轴、证据和人物协作。"
                 .to_string(),
             insights: vec![
@@ -718,14 +779,6 @@ pub fn risk_label(risk: ActionRisk) -> &'static str {
     }
 }
 
-pub fn risk_class(risk: ActionRisk) -> &'static str {
-    match risk {
-        ActionRisk::Auto => "badge badge--ok",
-        ActionRisk::ReviewRequired => "badge badge--warn",
-        ActionRisk::Guarded => "badge badge--bad",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,7 +898,10 @@ mod tests {
     fn workspace_route_only_opens_after_verified_session() {
         assert_eq!(workspace_tab_for_auth_gate(AuthGate::SignedOut), None);
         assert_eq!(workspace_tab_for_auth_gate(AuthGate::Verifying), None);
-        assert_eq!(workspace_tab_for_auth_gate(AuthGate::Ready), Some(Tab::Brief));
+        assert_eq!(
+            workspace_tab_for_auth_gate(AuthGate::Ready),
+            Some(Tab::Brief)
+        );
     }
 
     #[test]
@@ -859,12 +915,47 @@ mod tests {
     }
 
     #[test]
+    fn opening_canvas_does_not_clear_active_conversation() {
+        let state = WorkspaceState::new()
+            .with_case(true)
+            .after_user_submission()
+            .with_inserted_context("ctx-1", ObjectKind::Evidence, "合同原件")
+            .open_canvas(CanvasKind::Timeline);
+
+        assert_eq!(state.conversation_stage, ConversationStage::Active);
+        assert_eq!(state.canvas, Some(CanvasKind::Timeline));
+        assert_eq!(state.inserted_contexts.len(), 1);
+    }
+
+    #[test]
+    fn closing_canvas_returns_to_none_without_touching_context_blocks() {
+        let state = WorkspaceState::new()
+            .with_case(true)
+            .after_user_submission()
+            .with_inserted_context("ctx-1", ObjectKind::TimelineNode, "付款节点")
+            .open_canvas(CanvasKind::Persons)
+            .close_canvas();
+
+        assert_eq!(state.canvas, None);
+        assert_eq!(state.conversation_stage, ConversationStage::Active);
+        assert_eq!(state.inserted_contexts.len(), 1);
+        assert_eq!(state.inserted_contexts[0].title, "付款节点");
+    }
+
+    #[test]
     fn conversation_only_becomes_active_after_first_submission() {
         let mut state = WorkspaceState::new().with_case(true);
         assert_eq!(state.conversation_stage, ConversationStage::Empty);
 
         state = state.after_user_submission();
         assert_eq!(state.conversation_stage, ConversationStage::Active);
+    }
+
+    #[test]
+    fn plan_is_the_default_right_panel_tab() {
+        let right_panel = default_right_panel_state();
+        assert_eq!(right_panel.tab, RightPanelTab::Plan);
+        assert_eq!(right_panel.mode, PanelMode::Expanded);
     }
 
     #[test]
@@ -879,20 +970,52 @@ mod tests {
 
     #[test]
     fn selected_object_does_not_enter_prompt_until_inserted() {
-        let state = WorkspaceState::new()
-            .select_object("node-1", ObjectKind::TimelineNode, "付款节点");
+        let state =
+            WorkspaceState::new().select_object("node-1", ObjectKind::TimelineNode, "付款节点");
 
         assert!(state.selected_object.is_some());
         assert!(state.inserted_contexts.is_empty());
     }
 
     #[test]
-    fn pinned_panel_mode_survives_toggle() {
+    fn explicit_insert_moves_selected_object_into_inserted_contexts() {
+        let selected = Some(SelectedObject {
+            id: "node-1".to_string(),
+            kind: ObjectKind::TimelineNode,
+            title: "付款节点".to_string(),
+        });
+        let mut inserted = Vec::new();
+
+        let inserted_now = insert_selected_object(&selected, &mut inserted);
+
+        assert!(inserted_now);
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(inserted[0].title, "付款节点");
+        assert_eq!(inserted[0].kind, ObjectKind::TimelineNode);
+        assert!(!inserted[0].expanded);
+    }
+
+    #[test]
+    fn submitting_non_empty_message_appends_and_clears_draft() {
+        let mut messages = vec!["既有消息".to_string()];
+        let mut draft = "请总结当前争议焦点".to_string();
+
+        let submitted = submit_local_conversation_message(&mut messages, &mut draft);
+
+        assert!(submitted);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1], "请总结当前争议焦点");
+        assert!(draft.is_empty());
+    }
+
+    #[test]
+    fn pinned_panel_can_collapse_without_losing_tab() {
         let state = WorkspaceState::new()
-            .with_right_panel(RightPanelTab::Plan, PanelMode::Pinned)
+            .with_right_panel(RightPanelTab::Results, PanelMode::Pinned)
             .toggle_panel_collapsed();
 
-        assert_eq!(state.right_panel.mode, PanelMode::Pinned);
+        assert_eq!(state.right_panel.mode, PanelMode::Collapsed);
+        assert_eq!(state.right_panel.tab, RightPanelTab::Results);
     }
 
     #[test]
@@ -908,8 +1031,7 @@ mod tests {
 
     #[test]
     fn workspace_state_tracks_history_scope_variants() {
-        let state = WorkspaceState::new()
-            .with_history_scope(HistoryScope::AllConversations);
+        let state = WorkspaceState::new().with_history_scope(HistoryScope::AllConversations);
 
         assert_eq!(state.history_scope, HistoryScope::AllConversations);
 

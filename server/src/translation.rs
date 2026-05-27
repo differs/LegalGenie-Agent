@@ -833,7 +833,11 @@ async fn ensure_file_translation_session(
     state: &AppState,
     file_id: &str,
 ) -> anyhow::Result<TranslationSession> {
-    let current_provider = state.translation_provider.provider_name().trim().to_string();
+    let current_provider = state
+        .translation_provider
+        .provider_name()
+        .trim()
+        .to_string();
     let current_model = effective_model_name(state);
     loop {
         let existing: FileTranslationStateRow = sqlx::query_as(
@@ -1107,7 +1111,9 @@ impl OpenAiCompatibleTranslationProvider {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow!("TRANSLATION_BASE_URL is required when translation is enabled"))?;
+            .ok_or_else(|| {
+                anyhow!("TRANSLATION_BASE_URL is required when translation is enabled")
+            })?;
         let model_name = config
             .model
             .as_deref()
@@ -1222,7 +1228,11 @@ fn extract_message_text(content: serde_json::Value) -> Option<String> {
         serde_json::Value::Array(items) => {
             let text = items
                 .into_iter()
-                .filter_map(|item| item.get("text").and_then(|value| value.as_str()).map(str::to_string))
+                .filter_map(|item| {
+                    item.get("text")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
                 .collect::<Vec<_>>()
                 .join("");
             if text.trim().is_empty() {

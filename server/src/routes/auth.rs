@@ -45,6 +45,9 @@ struct Claims {
     username: String,
     roles: Vec<String>,
     token_type: TokenType,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token_version: Option<i64>,
     exp: usize,
     iat: usize,
 }
@@ -72,7 +75,7 @@ fn decode_jwt(secret: &str, token: &str) -> AppResult<Claims> {
         &DecodingKey::from_secret(secret.as_bytes()),
         &jwt_validation(),
     )
-    .map_err(|_| AppError::unauthorized("invalid token"))?;
+    .map_err(|_| AppError::unauthorized_code(401001, "invalid token"))?;
     Ok(data.claims)
 }
 
@@ -89,12 +92,13 @@ fn build_access_claims(
         username: username.to_string(),
         roles,
         token_type: TokenType::Access,
+        refresh_token_version: None,
         exp: exp.timestamp() as usize,
         iat: now.timestamp() as usize,
     }
 }
 
-fn build_refresh_claims(user_id: Uuid, expire_days: i64) -> Claims {
+fn build_refresh_claims(user_id: Uuid, expire_days: i64, refresh_token_version: i64) -> Claims {
     let now = Utc::now();
     let exp = now + Duration::days(expire_days);
     Claims {
@@ -102,6 +106,7 @@ fn build_refresh_claims(user_id: Uuid, expire_days: i64) -> Claims {
         username: String::new(),
         roles: Vec::new(),
         token_type: TokenType::Refresh,
+        refresh_token_version: Some(refresh_token_version),
         exp: exp.timestamp() as usize,
         iat: now.timestamp() as usize,
     }
@@ -125,21 +130,27 @@ fn hash_password(password: &str) -> AppResult<String> {
 fn validate_password_strength(password: &str) -> AppResult<()> {
     let p = password;
     if p.len() < 8 {
-        return Err(AppError::bad_request("password too short (min 8 chars)"));
+        return Err(AppError::bad_request_code(
+            400105,
+            "password too short (min 8 chars)",
+        ));
     }
 
     if !p.chars().any(|c| c.is_ascii_uppercase()) {
-        return Err(AppError::bad_request(
+        return Err(AppError::bad_request_code(
+            400105,
             "password too weak (must include uppercase letter)",
         ));
     }
     if !p.chars().any(|c| c.is_ascii_lowercase()) {
-        return Err(AppError::bad_request(
+        return Err(AppError::bad_request_code(
+            400105,
             "password too weak (must include lowercase letter)",
         ));
     }
     if !p.chars().any(|c| c.is_ascii_digit()) {
-        return Err(AppError::bad_request(
+        return Err(AppError::bad_request_code(
+            400105,
             "password too weak (must include a digit)",
         ));
     }
@@ -147,7 +158,7 @@ fn validate_password_strength(password: &str) -> AppResult<()> {
     let weak = ["123456", "password", "12345678", "qwerty"];
     let lower = p.to_ascii_lowercase();
     if weak.iter().any(|w| *w == lower.as_str()) {
-        return Err(AppError::bad_request("password too weak"));
+        return Err(AppError::bad_request_code(400105, "password too weak"));
     }
 
     Ok(())
@@ -155,7 +166,7 @@ fn validate_password_strength(password: &str) -> AppResult<()> {
 
 fn verify_password(password: &str, password_hash: &str) -> AppResult<bool> {
     let parsed = PasswordHash::new(password_hash)
-        .map_err(|_| AppError::unauthorized("invalid credentials"))?;
+        .map_err(|_| AppError::unauthorized_code(400101, "invalid credentials"))?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
@@ -221,6 +232,38 @@ struct UserRow {
     password_hash: String,
     real_name: Option<String>,
     status: String,
+}
+
+async fn fetch_refresh_token_version(state: &AppState, user_id: Uuid) -> AppResult<i64> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT refresh_token_version FROM users WHERE id = ?1 LIMIT 1")
+            .bind(user_id.to_string())
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    let Some((refresh_token_version,)) = row else {
+        return Err(AppError::unauthorized_code(401001, "invalid token"));
+    };
+
+    Ok(refresh_token_version)
+}
+
+async fn bump_refresh_token_version(state: &AppState, user_id: Uuid) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET refresh_token_version = refresh_token_version + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?1
+        "#,
+    )
+    .bind(user_id.to_string())
+    .execute(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    Ok(())
 }
 
 async fn register(
@@ -305,7 +348,7 @@ async fn register(
         roles.clone(),
         state.config.access_token_expire_minutes,
     );
-    let refresh_claims = build_refresh_claims(user_id, state.config.refresh_token_expire_days);
+    let refresh_claims = build_refresh_claims(user_id, state.config.refresh_token_expire_days, 0);
     let access_token = encode_jwt(&state.config.jwt_secret, &access_claims)?;
     let refresh_token = encode_jwt(&state.config.jwt_secret, &refresh_claims)?;
 
@@ -357,15 +400,15 @@ async fn login(
 
     let Some(user) = user else {
         // Do not leak which field failed.
-        return Err(AppError::unauthorized("invalid credentials"));
+        return Err(AppError::unauthorized_code(400101, "invalid credentials"));
     };
 
     if user.status != "active" {
-        return Err(AppError::forbidden("user inactive"));
+        return Err(AppError::forbidden_code(400103, "user inactive"));
     }
 
     if !verify_password(&req.password, &user.password_hash)? {
-        return Err(AppError::unauthorized("invalid credentials"));
+        return Err(AppError::unauthorized_code(400101, "invalid credentials"));
     }
 
     let roles: Vec<String> = sqlx::query_scalar(
@@ -384,7 +427,12 @@ async fn login(
         roles.clone(),
         state.config.access_token_expire_minutes,
     );
-    let refresh_claims = build_refresh_claims(user_id, state.config.refresh_token_expire_days);
+    let refresh_token_version = fetch_refresh_token_version(&state, user_id).await?;
+    let refresh_claims = build_refresh_claims(
+        user_id,
+        state.config.refresh_token_expire_days,
+        refresh_token_version,
+    );
     let access_token = encode_jwt(&state.config.jwt_secret, &access_claims)?;
     let refresh_token = encode_jwt(&state.config.jwt_secret, &refresh_claims)?;
 
@@ -400,6 +448,10 @@ async fn login(
         refresh_token,
         expires_in: state.config.access_token_expire_minutes * 60,
     };
+
+    // A successful login proves the credentials are valid now, so clear the
+    // transient failure window for this identity/IP pair.
+    state.rate_limiter.reset(&key).await;
 
     // remember_me is reserved for future: could lengthen refresh token or set cookie.
     let _ = req.remember_me;
@@ -441,25 +493,29 @@ async fn refresh(
 ) -> AppResult<Json<ApiEnvelope<RefreshResponseData>>> {
     let claims = decode_jwt(&state.config.jwt_secret, &req.refresh_token)?;
     if claims.token_type != TokenType::Refresh {
-        return Err(AppError::unauthorized("invalid token"));
+        return Err(AppError::unauthorized_code(401001, "invalid token"));
     }
 
-    let user_id =
-        Uuid::parse_str(&claims.sub).map_err(|_| AppError::unauthorized("invalid token"))?;
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::unauthorized_code(401001, "invalid token"))?;
 
     // Verify user still exists and is active.
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT username, status FROM users WHERE id = ?1 LIMIT 1")
-            .bind(user_id.to_string())
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+    let row: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT username, status, refresh_token_version FROM users WHERE id = ?1 LIMIT 1",
+    )
+    .bind(user_id.to_string())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    let Some((username, status)) = row else {
-        return Err(AppError::unauthorized("invalid token"));
+    let Some((username, status, refresh_token_version)) = row else {
+        return Err(AppError::unauthorized_code(401001, "invalid token"));
     };
     if status != "active" {
-        return Err(AppError::forbidden("user inactive"));
+        return Err(AppError::forbidden_code(400103, "user inactive"));
+    }
+    if claims.refresh_token_version.unwrap_or(0) != refresh_token_version {
+        return Err(AppError::unauthorized_code(401001, "invalid token"));
     }
 
     let roles: Vec<String> = sqlx::query_scalar(
@@ -489,7 +545,8 @@ async fn logout(
     user: AuthUser,
     meta: RequestMeta,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
-    // Stateless JWT: logout is a client-side concern unless we implement server-side revocation.
+    bump_refresh_token_version(&state, user.user_id).await?;
+
     spawn_operation_log(
         state.pool.clone(),
         OperationLogNew {
@@ -524,7 +581,7 @@ async fn me(
             .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let Some((email, real_name)) = row else {
-        return Err(AppError::unauthorized("invalid token"));
+        return Err(AppError::unauthorized_code(401001, "invalid token"));
     };
 
     Ok(Json(ApiEnvelope::ok(UserInfo {
@@ -550,16 +607,22 @@ async fn change_password(
             .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let Some((password_hash,)) = row else {
-        return Err(AppError::unauthorized("invalid token"));
+        return Err(AppError::unauthorized_code(401001, "invalid token"));
     };
 
     if !verify_password(&req.old_password, &password_hash)? {
-        return Err(AppError::unauthorized("invalid credentials"));
+        return Err(AppError::unauthorized_code(400101, "invalid credentials"));
     }
 
     let new_hash = hash_password(&req.new_password)?;
     sqlx::query(
-        "UPDATE users SET password_hash = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+        r#"
+        UPDATE users
+        SET password_hash = ?1,
+            refresh_token_version = refresh_token_version + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?2
+        "#,
     )
     .bind(new_hash)
     .bind(user.user_id.to_string())
@@ -614,11 +677,11 @@ impl FromRequestParts<AppState> for AuthUser {
 
         let claims = decode_jwt(&state.config.jwt_secret, auth_header)?;
         if claims.token_type != TokenType::Access {
-            return Err(AppError::unauthorized("invalid token"));
+            return Err(AppError::unauthorized_code(401001, "invalid token"));
         }
 
-        let user_id =
-            Uuid::parse_str(&claims.sub).map_err(|_| AppError::unauthorized("invalid token"))?;
+        let user_id = Uuid::parse_str(&claims.sub)
+            .map_err(|_| AppError::unauthorized_code(401001, "invalid token"))?;
 
         Ok(Self {
             user_id,

@@ -73,6 +73,89 @@ async fn login_rate_limited_after_too_many_attempts() {
     assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS);
 }
 
+#[tokio::test]
+async fn successful_logins_do_not_trigger_rate_limit() {
+    let (app, _tmp) = build_test_app().await;
+
+    let reg = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "successrateuser",
+            "email": "successrateuser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(reg.0, StatusCode::OK);
+
+    for _ in 0..6 {
+        let login = request_json(
+            &app,
+            Method::POST,
+            "/api/v1/auth/login",
+            None,
+            json!({
+                "username": "successrateuser",
+                "password": "Password123",
+            }),
+        )
+        .await;
+        assert_eq!(login.0, StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn spoofed_forwarded_ip_does_not_bypass_rate_limit_by_default() {
+    let (app, _tmp) = build_test_app().await;
+
+    let reg = request_json(
+        &app,
+        Method::POST,
+        "/api/v1/auth/register",
+        None,
+        json!({
+            "username": "spoofrateuser",
+            "email": "spoofrateuser@example.com",
+            "password": "Password123",
+        }),
+    )
+    .await;
+    assert_eq!(reg.0, StatusCode::OK);
+
+    for _ in 0..5 {
+        let login = request_json_with_headers(
+            &app,
+            Method::POST,
+            "/api/v1/auth/login",
+            None,
+            json!({
+                "username": "spoofrateuser",
+                "password": "WrongPass123",
+            }),
+            &[("x-forwarded-for", "1.1.1.1")],
+        )
+        .await;
+        assert_eq!(login.0, StatusCode::UNAUTHORIZED);
+    }
+
+    let limited = request_json_with_headers(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        json!({
+            "username": "spoofrateuser",
+            "password": "WrongPass123",
+        }),
+        &[("x-forwarded-for", "2.2.2.2"), ("x-real-ip", "3.3.3.3")],
+    )
+    .await;
+    assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS);
+}
+
 async fn build_test_app() -> (axum::Router, TempDir) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -111,6 +194,7 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         database_url: "sqlite::memory:".to_string(),
         cors_origins: CorsOrigins::Any,
         force_https: false,
+        trust_proxy_headers: false,
         jwt_secret: "test-secret-please-change-32-chars-min".to_string(),
         access_token_expire_minutes: 60,
         refresh_token_expire_days: 7,
@@ -135,12 +219,26 @@ async fn request_json(
     bearer: Option<&str>,
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
+    request_json_with_headers(app, method, uri, bearer, body, &[]).await
+}
+
+async fn request_json_with_headers(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    bearer: Option<&str>,
+    body: serde_json::Value,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, serde_json::Value) {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(token) = bearer {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
     }
     let req = builder
         .body(Body::from(body.to_string()))

@@ -29,6 +29,8 @@ struct NodeListQuery {
     start_date: Option<String>,
     #[serde(default)]
     end_date: Option<String>,
+    #[serde(default)]
+    tags: Option<String>, // comma-separated
     #[serde(default = "default_page")]
     page: i64,
     #[serde(default = "default_page_size")]
@@ -119,6 +121,7 @@ async fn list_nodes(
     ensure_case_access(&state.pool, user.user_id, &case_id).await?;
 
     let (start, end) = parse_date_range(q.start_date.as_deref(), q.end_date.as_deref())?;
+    let tag_filters = parse_tag_filters(q.tags.as_deref());
     let page = q.page.max(1);
     let page_size = q.page_size.clamp(1, 500);
     let offset = (page - 1) * page_size;
@@ -134,6 +137,11 @@ async fn list_nodes(
         if let Some(end) = end {
             qb.push(" AND event_time <= ");
             qb.push_bind(end.to_string());
+        }
+        for tag in tag_filters.iter() {
+            qb.push(" AND LOWER(COALESCE(tags, '[]')) LIKE ");
+            // tags are stored as JSON array text; matching `"tag"` is a practical filter.
+            qb.push_bind(format!("%\"{}\"%", tag));
         }
 
         qb.build_query_as::<(i64,)>()
@@ -155,6 +163,10 @@ async fn list_nodes(
         if let Some(end) = end {
             qb.push(" AND event_time <= ");
             qb.push_bind(end.to_string());
+        }
+        for tag in tag_filters.iter() {
+            qb.push(" AND LOWER(COALESCE(tags, '[]')) LIKE ");
+            qb.push_bind(format!("%\"{}\"%", tag));
         }
         qb.push(" ORDER BY event_time ASC, sort_order ASC LIMIT ");
         qb.push_bind(page_size);
@@ -222,7 +234,7 @@ async fn create_node(
     Json(req): Json<CreateNodeRequest>,
 ) -> AppResult<Json<ApiEnvelope<TimelineNode>>> {
     let case_id = normalize_case_id(&case_id)?;
-    ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+    crate::access::ensure_case_write_access(&state.pool, user.user_id, &case_id).await?;
 
     let title = req.title.trim();
     if title.is_empty() {
@@ -380,6 +392,17 @@ fn parse_date_range(
         }
     }
     Ok((start, end))
+}
+
+fn parse_tag_filters(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .take(10)
+        .collect::<Vec<_>>()
 }
 
 fn parse_date(raw: &str) -> AppResult<NaiveDate> {

@@ -20,3 +20,5 @@
 # Tool caches
 /.ruff_cache/
 
+# Local agent runtime state
+/.superpowers/

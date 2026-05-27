@@ -3,7 +3,13 @@ use dioxus::prelude::*;
 
 #[component]
 pub fn LogsPage() -> Element {
+    rsx! { LogsPageContent { utility_mode: false } }
+}
+
+#[component]
+pub fn LogsPageContent(utility_mode: bool) -> Element {
     let ctx = use_context::<AppCtx>();
+    let initial_case_filter = ctx.case_id();
 
     let mut action = use_signal(String::new);
     let mut module = use_signal(String::new);
@@ -13,13 +19,13 @@ pub fn LogsPage() -> Element {
     let mut refresh_tick = use_signal(|| 0u64);
 
     let mut selected_target = use_signal(|| None::<(String, String)>);
-    let mut case_id_sig = ctx.case_id;
+    let mut case_filter = use_signal(move || initial_case_filter);
 
     let logs = use_resource(move || {
         let _ = refresh_tick();
         let base = ctx.api_base();
         let token = ctx.token();
-        let case_id = ctx.case_id();
+        let case_id = case_filter();
         let page = page();
         let page_size = page_size();
         let action = action();
@@ -95,7 +101,7 @@ pub fn LogsPage() -> Element {
     let on_export_csv = {
         let run_download = run_download.clone();
         move |_| {
-            let case_id = ctx.case_id();
+            let case_id = case_filter();
             let mut q = String::new();
             if !case_id.trim().is_empty() {
                 q.push_str(&format!("case_id={}", urlencoding::encode(case_id.trim())));
@@ -110,7 +116,7 @@ pub fn LogsPage() -> Element {
     };
 
     let on_export_excel = move |_| {
-        let case_id = ctx.case_id();
+        let case_id = case_filter();
         let mut parts = vec!["format=excel".to_string()];
         if !case_id.trim().is_empty() {
             parts.push(format!("case_id={}", urlencoding::encode(case_id.trim())));
@@ -121,11 +127,24 @@ pub fn LogsPage() -> Element {
         );
     };
 
+    use_effect(move || {
+        let _ = case_filter();
+        let _ = action();
+        let _ = module();
+        let _ = keyword();
+        let _ = page();
+        let _ = page_size();
+        let _ = refresh_tick();
+        selected_target.set(None);
+    });
+
     rsx! {
-        section { class: "panel",
-            header { class: "panel__head",
-                h2 { "Operation Logs" }
-                p { class: "muted", "Search logs, export to CSV/Excel, view target history." }
+        section { class: if utility_mode { "panel panel--embedded" } else { "panel" },
+            if !utility_mode {
+                header { class: "panel__head",
+                    h2 { "Operation Logs" }
+                    p { class: "muted", "Search logs, export to CSV/Excel, view target history." }
+                }
             }
 
             div { class: "grid",
@@ -133,9 +152,9 @@ pub fn LogsPage() -> Element {
                     h3 { "Filters" }
                     label { "Case ID"
                         input {
-                            value: ctx.case_id(),
+                            value: case_filter(),
                             placeholder: "UUID (optional)",
-                            oninput: move |e| case_id_sig.set(e.value()),
+                            oninput: move |e| case_filter.set(e.value()),
                         }
                     }
                     div { class: "row",

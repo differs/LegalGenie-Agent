@@ -1,0 +1,35 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: "${APP_ENV:-development}"
+      FORCE_HTTPS: "${FORCE_HTTPS:-false}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+
+      JWT_SECRET: "${JWT_SECRET:-change-me-to-a-long-random-secret}"
+      ACCESS_TOKEN_EXPIRE_MINUTES: "${ACCESS_TOKEN_EXPIRE_MINUTES:-60}"
+      REFRESH_TOKEN_EXPIRE_DAYS: "${REFRESH_TOKEN_EXPIRE_DAYS:-7}"
+
+      MAX_FILE_SIZE: "${MAX_FILE_SIZE:-104857600}"
+      ALLOWED_FILE_TYPES: "${ALLOWED_FILE_TYPES:-pdf,doc,docx,xls,xlsx,jpg,jpeg,png,mp3,wav,txt,json}"
+
+      ASR_LANGUAGE: "${ASR_LANGUAGE:-zh}"
+      ASR_THREADS: "${ASR_THREADS:-4}"
+
+      # Ensure the server is reachable from outside the container.
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8000"
+
+      # Keep default paths consistent with repo layout mounted below.
+      DATABASE_URL: "sqlite://data/legal_minds.db"
+      STORAGE_PATH: "./storage"
+      TEMP_PATH: "./storage/temp"
+      TESSDATA_DIR: "./data/tessdata"
+      WHISPER_MODEL_PATH: "./data/models/whisper/ggml-tiny.bin"
+    volumes:
+      - ./data:/app/data
+      - ./storage:/app/storage

@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 
 #[component]
 pub fn CasesPage() -> Element {
-    let ctx = use_context::<AppCtx>();
+    let mut ctx = use_context::<AppCtx>();
 
     let mut case_name = use_signal(String::new);
     let mut case_desc = use_signal(String::new);
@@ -13,6 +13,7 @@ pub fn CasesPage() -> Element {
     let mut refresh_tick = use_signal(|| 0u64);
 
     let mut case_id_sig = ctx.case_id;
+    let mut case_id_draft_sig = ctx.case_id_draft;
     let mut status_sig = ctx.status;
 
     let list = use_resource(move || {
@@ -61,6 +62,7 @@ pub fn CasesPage() -> Element {
             match api::post_create_case(&base, &token, name.trim(), desc_opt.as_deref()).await {
                 Ok(created) => {
                     case_id.set(created.id.clone());
+                    ctx.case_id_draft.set(created.id.clone());
                     case_name.set(String::new());
                     case_desc.set(String::new());
                     refresh_tick.set(refresh_tick() + 1);
@@ -117,6 +119,7 @@ pub fn CasesPage() -> Element {
                         Some(Ok(Some(data))) => rsx!{
                             CasesTable { data: data.clone(), on_select: move |id: String| {
                                 case_id_sig.set(id.clone());
+                                case_id_draft_sig.set(id.clone());
                                 status_sig.set(Some(format!("Selected case: {id}")));
                             }}
                             div { class: "pager",

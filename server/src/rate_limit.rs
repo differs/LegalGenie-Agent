@@ -27,4 +27,9 @@ impl RateLimiter {
         user_attempts.push(now);
         true
     }
+
+    pub async fn reset(&self, key: &str) {
+        let mut attempts = self.attempts.lock().await;
+        attempts.remove(key);
+    }
 }

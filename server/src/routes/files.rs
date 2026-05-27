@@ -637,8 +637,8 @@ async fn parse_file(
     }
 
     let started = crate::parser::enqueue_parse(state.clone(), row.id.clone(), true)
-    .await
-    .map_err(|e| AppError::internal(format!("enqueue parse failed: {e}")))?;
+        .await
+        .map_err(|e| AppError::internal(format!("enqueue parse failed: {e}")))?;
 
     if !started {
         return Err(AppError::not_found_code(420101, "file not found"));

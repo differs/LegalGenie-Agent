@@ -213,10 +213,7 @@ pub async fn create_case(
     )
     .await;
     assert_eq!(resp.0, StatusCode::OK);
-    resp.1["data"]["id"]
-        .as_str()
-        .expect("case id")
-        .to_string()
+    resp.1["data"]["id"].as_str().expect("case id").to_string()
 }
 
 pub async fn upload_text_file(

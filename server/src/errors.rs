@@ -40,6 +40,13 @@ impl AppError {
         }
     }
 
+    pub fn bad_request_code(error_code: i32, message: impl Into<String>) -> Self {
+        Self::BadRequest {
+            message: message.into(),
+            error_code,
+        }
+    }
+
     pub fn too_many_requests(message: impl Into<String>) -> Self {
         // Align with docs: AUTH_TOO_MANY_ATTEMPTS (400104)
         Self::TooManyRequests {
@@ -55,6 +62,13 @@ impl AppError {
         }
     }
 
+    pub fn unauthorized_code(error_code: i32, message: impl Into<String>) -> Self {
+        Self::Unauthorized {
+            message: message.into(),
+            error_code,
+        }
+    }
+
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::Forbidden {
             message: message.into(),
@@ -62,10 +76,24 @@ impl AppError {
         }
     }
 
+    pub fn forbidden_code(error_code: i32, message: impl Into<String>) -> Self {
+        Self::Forbidden {
+            message: message.into(),
+            error_code,
+        }
+    }
+
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::NotFound {
             message: message.into(),
             error_code: 404000,
+        }
+    }
+
+    pub fn not_found_code(error_code: i32, message: impl Into<String>) -> Self {
+        Self::NotFound {
+            message: message.into(),
+            error_code,
         }
     }
 

@@ -557,11 +557,12 @@ async fn target_history(
 ) -> AppResult<Json<ApiEnvelope<TargetHistoryData>>> {
     let is_admin = user.roles.iter().any(|r| r == "admin");
 
-    let tt = target_type.trim();
+    let tt_raw = target_type.trim();
     let tid = target_id.trim();
-    if tt.is_empty() || tid.is_empty() {
+    if tt_raw.is_empty() || tid.is_empty() {
         return Err(AppError::bad_request("target_type/target_id required"));
     }
+    let tt = normalize_history_target_type(tt_raw);
 
     let rows: Vec<HistoryRow> = sqlx::query_as(
         r#"
@@ -610,10 +611,19 @@ async fn target_history(
         .collect::<Vec<_>>();
 
     Ok(Json(ApiEnvelope::ok(TargetHistoryData {
-        target_type: tt.to_string(),
+        target_type: tt_raw.to_string(),
         target_id: tid.to_string(),
         history,
     })))
+}
+
+fn normalize_history_target_type(raw: &str) -> &str {
+    // Keep the history API ergonomic for clients while allowing internal target_type names.
+    match raw {
+        "node" => "event_node",
+        "evidence" | "file" => "evidence_file",
+        _ => raw,
+    }
 }
 
 fn apply_filters(

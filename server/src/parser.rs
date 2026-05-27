@@ -229,10 +229,7 @@ struct EvidenceFileToParse {
     storage_path: String,
 }
 
-async fn parse_and_update(
-    state: &AppState,
-    file_id: &str,
-) -> anyhow::Result<()> {
+async fn parse_and_update(state: &AppState, file_id: &str) -> anyhow::Result<()> {
     let row: Option<EvidenceFileToParse> = sqlx::query_as(
         r#"
         SELECT id, case_id, original_name, file_type, storage_path

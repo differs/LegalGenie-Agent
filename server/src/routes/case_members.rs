@@ -16,6 +16,7 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/:case_id/members", get(list_members).post(add_member))
+        .route("/:case_id/members/me", get(get_my_membership))
         .route("/:case_id/members/:user_id", delete(remove_member))
 }
 
@@ -52,6 +53,14 @@ struct CaseMember {
     role_in_case: String,
     joined_at: String,
     joined_by: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CaseMemberMeData {
+    case_id: String,
+    user_id: String,
+    username: String,
+    role_in_case: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +149,50 @@ async fn list_members(
         total: total.0,
         page,
         page_size,
+    })))
+}
+
+async fn get_my_membership(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(case_id): Path<String>,
+) -> AppResult<Json<ApiEnvelope<CaseMemberMeData>>> {
+    let case_id = normalize_uuid(&case_id, "invalid case_id")?;
+    ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+
+    let user_id = user.user_id.to_string();
+
+    let role_row: Option<(String,)> = sqlx::query_as(
+        "SELECT role_in_case FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1",
+    )
+    .bind(&case_id)
+    .bind(&user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    let role_in_case = if let Some((r,)) = role_row {
+        r
+    } else {
+        // Fallback for older data where owner membership row might not exist.
+        let owner_row: Option<(String,)> = sqlx::query_as(
+            "SELECT owner_id FROM cases WHERE id = ?1 AND status != 'deleted' LIMIT 1",
+        )
+        .bind(&case_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+        match owner_row {
+            Some((owner_id,)) if owner_id == user_id => "owner".to_string(),
+            _ => return Err(AppError::forbidden_code(410102, "no case access")),
+        }
+    };
+
+    Ok(Json(ApiEnvelope::ok(CaseMemberMeData {
+        case_id,
+        user_id,
+        username: user.username,
+        role_in_case,
     })))
 }
 
@@ -239,8 +292,7 @@ async fn add_member(
         VALUES (?1, ?2, ?3, ?4, ?5)
         ON CONFLICT(case_id, user_id)
         DO UPDATE SET
-          role_in_case = excluded.role_in_case,
-          joined_by = excluded.joined_by
+          role_in_case = excluded.role_in_case
         "#,
     )
     .bind(new_id.to_string())

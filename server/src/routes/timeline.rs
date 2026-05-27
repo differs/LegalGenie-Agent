@@ -1,4 +1,3 @@
-use crate::access::ensure_case_access;
 use crate::api::ApiEnvelope;
 use crate::context::RequestMeta;
 use crate::errors::{AppError, AppResult};
@@ -7,7 +6,7 @@ use crate::routes::auth::AuthUser;
 use crate::state::AppState;
 use axum::{
     extract::{Path, State},
-    routing::{delete, post, put},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::NaiveDate;
@@ -16,7 +15,10 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/nodes/:id", put(update_node).delete(delete_node))
+        .route(
+            "/nodes/:id",
+            get(get_node).put(update_node).delete(delete_node),
+        )
         .route("/nodes/:id/move", post(move_node))
         .route("/nodes/:id/evidence", post(link_evidence))
         .route("/nodes/:id/evidence/:link_id", delete(unlink_evidence))
@@ -88,6 +90,16 @@ struct TimelineNode {
     updated_at: String,
 }
 
+async fn get_node(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ApiEnvelope<TimelineNode>>> {
+    let node_id = normalize_uuid(&id, "invalid node id")?;
+    let node = fetch_node_with_links_read(&state, &user, &node_id).await?;
+    Ok(Json(ApiEnvelope::ok(node)))
+}
+
 async fn update_node(
     State(state): State<AppState>,
     user: AuthUser,
@@ -135,15 +147,21 @@ async fn update_node(
         None => existing_tags,
     };
 
-    // If the event_time changes, append to the end of that date's ordering.
+    // If the event_time changes, append to the end of that date's ordering first,
+    // then re-sequence both days so drag-and-drop stays stable over time.
     let mut sort_order = existing_sort_order;
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
     if new_event_time != existing_event_time {
         let next_sort: (i64,) = sqlx::query_as(
             "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM event_nodes WHERE case_id = ?1 AND event_time = ?2 AND status != 'deleted'",
         )
         .bind(&existing_case_id)
         .bind(&new_event_time)
-        .fetch_one(&state.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| AppError::internal(format!("db error: {e}")))?;
         sort_order = next_sort.0;
@@ -162,9 +180,18 @@ async fn update_node(
     .bind(sort_order)
     .bind(&new_tags_json)
     .bind(&node_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    if new_event_time != existing_event_time {
+        resequence_day_orders(&mut tx, &existing_case_id, &new_event_time, Some(&node_id)).await?;
+        resequence_day_orders(&mut tx, &existing_case_id, &existing_event_time, None).await?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let old_tags = existing
         .tags
@@ -240,6 +267,12 @@ async fn move_node(
     });
 
     let new_time = parse_date(&req.new_time)?.to_string();
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
     let new_sort_order = match req.new_sort_order {
         Some(v) => v,
         None => {
@@ -248,7 +281,7 @@ async fn move_node(
             )
             .bind(&existing.case_id)
             .bind(&new_time)
-            .fetch_one(&state.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| AppError::internal(format!("db error: {e}")))?;
             next_sort.0
@@ -261,9 +294,18 @@ async fn move_node(
     .bind(&new_time)
     .bind(new_sort_order)
     .bind(&node_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    resequence_day_orders(&mut tx, &existing.case_id, &new_time, Some(&node_id)).await?;
+    if existing.event_time != new_time {
+        resequence_day_orders(&mut tx, &existing.case_id, &existing.event_time, None).await?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let node = fetch_node_with_links(&state, &user, &node_id).await?;
 
@@ -531,10 +573,71 @@ async fn fetch_node(state: &AppState, user: &AuthUser, node_id: &str) -> AppResu
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let Some(row) = row else {
-        return Err(AppError::not_found("node not found"));
+        return Err(AppError::not_found_code(430101, "node not found"));
     };
-    ensure_case_access(&state.pool, user.user_id, &row.case_id).await?;
+    crate::access::ensure_case_write_access(&state.pool, user.user_id, &row.case_id).await?;
     Ok(row)
+}
+
+async fn fetch_node_read(state: &AppState, user: &AuthUser, node_id: &str) -> AppResult<NodeRow> {
+    let row: Option<NodeRow> = sqlx::query_as(
+        r#"
+        SELECT id, case_id, title, description, event_time, sort_order, tags, status, created_at, updated_at
+        FROM event_nodes
+        WHERE id = ?1 AND status != 'deleted'
+        LIMIT 1
+        "#,
+    )
+    .bind(node_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    let Some(row) = row else {
+        return Err(AppError::not_found_code(430101, "node not found"));
+    };
+    crate::access::ensure_case_access(&state.pool, user.user_id, &row.case_id).await?;
+    Ok(row)
+}
+
+async fn resequence_day_orders(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    case_id: &str,
+    event_time: &str,
+    prioritized_node_id: Option<&str>,
+) -> AppResult<()> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        r#"
+        SELECT id
+        FROM event_nodes
+        WHERE case_id = ?1 AND event_time = ?2 AND status != 'deleted'
+        ORDER BY
+            sort_order ASC,
+            CASE WHEN ?3 IS NOT NULL AND id = ?3 THEN 0 ELSE 1 END ASC,
+            created_at ASC,
+            id ASC
+        "#,
+    )
+    .bind(case_id)
+    .bind(event_time)
+    .bind(prioritized_node_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    for (index, (id,)) in rows.into_iter().enumerate() {
+        let new_order = ((index as i64) + 1) * 100;
+        sqlx::query(
+            "UPDATE event_nodes SET sort_order = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+        )
+        .bind(new_order)
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+    }
+
+    Ok(())
 }
 
 async fn fetch_node_with_links(
@@ -543,6 +646,65 @@ async fn fetch_node_with_links(
     node_id: &str,
 ) -> AppResult<TimelineNode> {
     let node = fetch_node(state, user, node_id).await?;
+
+    let link_rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT
+            l.id,
+            l.evidence_id,
+            e.original_name AS evidence_name,
+            l.anchor_type,
+            l.anchor_data
+        FROM node_evidence_links l
+        JOIN evidence_files e ON e.id = l.evidence_id
+        WHERE l.node_id = ?1 AND e.status != 'deleted'
+        ORDER BY l.created_at ASC
+        "#,
+    )
+    .bind(&node.id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    let evidence_links = link_rows
+        .into_iter()
+        .map(
+            |(id, evidence_id, evidence_name, anchor_type, anchor_data)| EvidenceLink {
+                id,
+                evidence_id,
+                evidence_name,
+                anchor_type,
+                anchor_data: anchor_data
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str(raw).ok()),
+            },
+        )
+        .collect::<Vec<_>>();
+
+    Ok(TimelineNode {
+        id: node.id,
+        case_id: node.case_id,
+        title: node.title,
+        description: node.description,
+        event_time: node.event_time,
+        sort_order: node.sort_order,
+        tags: node
+            .tags
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+            .unwrap_or_default(),
+        evidence_links,
+        created_at: node.created_at,
+        updated_at: node.updated_at,
+    })
+}
+
+async fn fetch_node_with_links_read(
+    state: &AppState,
+    user: &AuthUser,
+    node_id: &str,
+) -> AppResult<TimelineNode> {
+    let node = fetch_node_read(state, user, node_id).await?;
 
     let link_rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
         r#"
