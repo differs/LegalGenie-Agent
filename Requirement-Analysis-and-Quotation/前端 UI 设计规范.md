@@ -20,7 +20,7 @@
 ### 1.2 设计系统
 
 ```
-LegalMinds Design System
+LegalGenie Agent Design System
 ├── 色彩系统
 ├── 字体系统
 ├── 组件库

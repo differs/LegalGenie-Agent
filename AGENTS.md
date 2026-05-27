@@ -1,7 +1,7 @@
-# AGENTS.md - Development Guidelines for LegalMinds
+# AGENTS.md - Development Guidelines for LegalGenie Agent
 
 ## Project Overview
-LegalMinds is a legal technology project. Currently in initial setup phase with requirement analysis structure in place.
+LegalGenie Agent is a legal technology project. Currently in initial setup phase with requirement analysis structure in place.
 
 ## Build / Lint / Test Commands
 

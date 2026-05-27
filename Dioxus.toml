@@ -1,6 +1,6 @@
 [application]
-name = "legalminds"
+name = "legalgenie-agent"
 sub_package = "legalminds-frontend"
 
 [web.app]
-title = "LegalMinds"
+title = "LegalGenie Agent"
