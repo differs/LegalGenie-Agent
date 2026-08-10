@@ -3,8 +3,6 @@ use sqlx::PgPool;
 use std::path::Path;
 use std::str::FromStr;
 
-pub type DbPool = PgPool;
-
 /// Applies the PostgreSQL schema migrations.
 pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
     sqlx::migrate!("./migrations_pg")

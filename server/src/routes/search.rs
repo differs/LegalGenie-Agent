@@ -1426,21 +1426,6 @@ fn parse_anchor_json(raw: Option<String>) -> AppResult<serde_json::Value> {
     }
 }
 
-fn find_match_offsets(text: &str, keyword_raw: &str) -> Option<(i64, i64)> {
-    let keyword_raw = keyword_raw.trim();
-    if keyword_raw.is_empty() {
-        return None;
-    }
-
-    find_text_span(text, keyword_raw).or_else(|| {
-        keyword_raw
-            .split_whitespace()
-            .filter(|part| !part.is_empty())
-            .filter_map(|part| find_text_span(text, part))
-            .min_by_key(|(start, _)| *start)
-    })
-}
-
 fn find_text_span(text: &str, needle: &str) -> Option<(i64, i64)> {
     if needle.is_empty() {
         return None;
@@ -1491,17 +1476,6 @@ fn highlight_match(text: &str, keyword: Option<&str>) -> String {
     out.push_str("</em>");
     out.push_str(&text[byte_end..]);
     out
-}
-
-fn char_offset_to_byte_index(text: &str, char_offset: usize) -> usize {
-    if char_offset == 0 {
-        return 0;
-    }
-
-    text.char_indices()
-        .nth(char_offset)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len())
 }
 
 async fn search_nodes(

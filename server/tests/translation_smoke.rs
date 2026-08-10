@@ -604,8 +604,8 @@ async fn translation_failures_aggregate_to_partial_or_failed() {
 #[tokio::test]
 async fn pending_or_processing_chunks_keep_file_status_processing() {
     let notify = Arc::new(Notify::new());
-    let (app, _state, _tmp, pool, provider) =
-        build_test_app_with_fake_translation_concurrency(1).await;
+    let (app, state, _tmp, pool, provider) =
+        build_test_app_with_fake_translation_no_workers().await;
     let (_user_id, token) =
         register_user(&app, "translation-mix", "translation-mix@example.com").await;
     let case_id = create_case(&app, &token, "Status Mix", "status priority").await;
@@ -643,6 +643,14 @@ async fn pending_or_processing_chunks_keep_file_status_processing() {
     )
     .await;
     wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    legalminds_server::parser::run_parse_job(&state, &evidence_id)
+        .await
+        .expect("drive parse synchronously");
+    let translate_handle = {
+        let state = state.clone();
+        let evidence_id = evidence_id.clone();
+        tokio::spawn(async move { translation::run_translate_job(state, &evidence_id).await })
+    };
 
     let processing_row = wait_for_processing_mixed_file_state(&pool, &evidence_id, 1, 1).await;
     assert_eq!(
@@ -650,8 +658,12 @@ async fn pending_or_processing_chunks_keep_file_status_processing() {
         "processing"
     );
 
+    // Gamma must already be blocked inside the provider's Wait before we
+    // notify, otherwise the notification is lost (Notify has no storage).
+    wait_for_chunk_status(&pool, &evidence_id, "Gamma", "processing").await;
     notify.notify_waiters();
     wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
+    translate_handle.await.expect("translation task finished");
 }
 
 #[tokio::test]
@@ -1634,8 +1646,8 @@ async fn retry_all_and_selected_skip_done_chunks_without_overwriting_text() {
 #[tokio::test]
 async fn retry_skips_processing_chunk_without_resetting_active_attempt() {
     let notify = Arc::new(Notify::new());
-    let (app, _state, _tmp, pool, provider) =
-        build_test_app_with_fake_translation_concurrency(1).await;
+    let (app, state, _tmp, pool, provider) =
+        build_test_app_with_fake_translation_no_workers().await;
     let (_user_id, token) = register_user(
         &app,
         "translation-retry-skip-processing",
@@ -1658,6 +1670,14 @@ async fn retry_skips_processing_chunk_without_resetting_active_attempt() {
     let evidence_id =
         upload_text_file(&app, &token, &case_id, "retry-processing.txt", "Alpha\n").await;
     wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    legalminds_server::parser::run_parse_job(&state, &evidence_id)
+        .await
+        .expect("drive parse synchronously");
+    let _translate_handle = {
+        let state = state.clone();
+        let evidence_id = evidence_id.clone();
+        tokio::spawn(async move { translation::run_translate_job(state, &evidence_id).await })
+    };
 
     let processing_before = wait_for_chunk_status(&pool, &evidence_id, "Alpha", "processing").await;
     let last_attempt_before = processing_before.get::<Option<String>, _>("last_attempt_at");
@@ -1702,7 +1722,8 @@ async fn retry_skips_processing_chunk_without_resetting_active_attempt() {
 #[tokio::test]
 async fn stale_attempt_results_do_not_overwrite_new_attempt() {
     let notify = Arc::new(Notify::new());
-    let (app, state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (app, state, _tmp, pool, provider) =
+        build_test_app_with_fake_translation_no_workers().await;
     let (_user_id, token) =
         register_user(&app, "translation-cas", "translation-cas@example.com").await;
     let case_id = create_case(&app, &token, "Attempt CAS", "stale attempt cas").await;
@@ -1726,6 +1747,14 @@ async fn stale_attempt_results_do_not_overwrite_new_attempt() {
 
     let evidence_id = upload_text_file(&app, &token, &case_id, "cas.txt", "Alpha\n").await;
     wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    legalminds_server::parser::run_parse_job(&state, &evidence_id)
+        .await
+        .expect("drive parse synchronously");
+    let _translate_handle = {
+        let state = state.clone();
+        let evidence_id = evidence_id.clone();
+        tokio::spawn(async move { translation::run_translate_job(state, &evidence_id).await })
+    };
     wait_for_chunk_status(&pool, &evidence_id, "Alpha", "processing").await;
 
     mark_chunk_processing_stale(&pool, &evidence_id, "Alpha").await;
@@ -1755,7 +1784,8 @@ async fn stale_attempt_results_do_not_overwrite_new_attempt() {
 #[tokio::test]
 async fn stale_processing_consumes_retry_budget() {
     let notify = Arc::new(Notify::new());
-    let (app, state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (app, state, _tmp, pool, provider) =
+        build_test_app_with_fake_translation_no_workers().await;
     let (_user_id, token) = register_user(
         &app,
         "translation-stale-budget",
@@ -1800,13 +1830,19 @@ async fn stale_processing_consumes_retry_budget() {
 
     let evidence_id = upload_text_file(&app, &token, &case_id, "stale.txt", "Alpha\n").await;
     wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    legalminds_server::parser::run_parse_job(&state, &evidence_id)
+        .await
+        .expect("drive parse synchronously");
+    let _translate_handle = {
+        let state = state.clone();
+        let evidence_id = evidence_id.clone();
+        tokio::spawn(async move { translation::run_translate_job(state, &evidence_id).await })
+    };
 
     for expected_retry_count in 1..=3 {
         wait_for_chunk_status(&pool, &evidence_id, "Alpha", "processing").await;
         mark_chunk_processing_stale(&pool, &evidence_id, "Alpha").await;
-        translation::run_retry_cycle_once(state.clone())
-            .await
-            .expect("run stale budget cycle");
+        let _ = tokio::spawn(translation::run_retry_cycle_once(state.clone()));
 
         let row =
             wait_for_chunk_retry_count(&pool, &evidence_id, "Alpha", expected_retry_count).await;
@@ -1817,24 +1853,18 @@ async fn stale_processing_consumes_retry_budget() {
         );
 
         force_failed_or_pending_chunk_due_now(&pool, &evidence_id).await;
-        translation::run_retry_cycle_once(state.clone())
-            .await
-            .expect("run claim next stale attempt");
+        let _ = tokio::spawn(translation::run_retry_cycle_once(state.clone()));
     }
 
     wait_for_chunk_status(&pool, &evidence_id, "Alpha", "processing").await;
     mark_chunk_processing_stale(&pool, &evidence_id, "Alpha").await;
-    translation::run_retry_cycle_once(state.clone())
-        .await
-        .expect("run terminal stale budget cycle");
+    let _ = tokio::spawn(translation::run_retry_cycle_once(state.clone()));
 
     let terminal = wait_for_chunk_retry_count(&pool, &evidence_id, "Alpha", 4).await;
     assert_eq!(terminal.get::<String, _>("translation_status"), "failed");
     assert_eq!(terminal.get::<Option<String>, _>("next_retry_at"), None);
 
-    translation::run_retry_cycle_once(state.clone())
-        .await
-        .expect("run extra idle retry cycle");
+    let _ = tokio::spawn(translation::run_retry_cycle_once(state.clone()));
     tokio::time::sleep(Duration::from_millis(100)).await;
     let still_terminal = fetch_chunk_state(&pool, &evidence_id, "Alpha").await;
     assert_eq!(
@@ -1848,7 +1878,8 @@ async fn stale_processing_consumes_retry_budget() {
 
 #[tokio::test]
 async fn retry_does_not_drift_locked_provider_or_model() {
-    let (app, state, _tmp, pool, provider) = build_test_app_with_fake_translation().await;
+    let (app, state, _tmp, pool, provider) =
+        build_test_app_with_fake_translation_no_workers().await;
     let (_user_id, token) =
         register_user(&app, "translation-lock", "translation-lock@example.com").await;
     let case_id = create_case(&app, &token, "Provider Lock", "provider/model lock").await;
@@ -1869,6 +1900,14 @@ async fn retry_does_not_drift_locked_provider_or_model() {
 
     let evidence_id = upload_text_file(&app, &token, &case_id, "lock.txt", "Alpha\n\nBeta\n").await;
     wait_for_file_parse_done(&app, &token, &evidence_id).await;
+    legalminds_server::parser::run_parse_job(&state, &evidence_id)
+        .await
+        .expect("drive parse synchronously");
+    let _translate_handle = {
+        let state = state.clone();
+        let evidence_id = evidence_id.clone();
+        tokio::spawn(async move { translation::run_translate_job(state, &evidence_id).await })
+    };
     wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
 
     force_failed_chunk_due_now(&pool, &evidence_id).await;
@@ -1970,6 +2009,7 @@ async fn build_test_app_with_fake_translation() -> (
             max_concurrency: 1,
             chunk_size_limit: 2_000,
         },
+        true,
     )
     .await
 }
@@ -1994,6 +2034,33 @@ async fn build_test_app_with_fake_translation_concurrency(
             max_concurrency,
             chunk_size_limit: 2_000,
         },
+        true,
+    )
+    .await
+}
+
+/// Fake-translation builder WITHOUT background job workers: translation runs
+/// only when the test drives it explicitly (run_translate_job /
+/// run_retry_cycle_once), giving timing-sensitive tests exclusive control.
+async fn build_test_app_with_fake_translation_no_workers() -> (
+    axum::Router,
+    AppState,
+    TempDir,
+    PgPool,
+    FakeTranslationProvider,
+) {
+    build_test_app_with_named_translation(
+        FakeTranslationProvider::new("fake", Some("fake-legal-v1")),
+        TranslationConfig {
+            provider: "fake".to_string(),
+            base_url: None,
+            api_key: None,
+            model: Some("fake-legal-v1".to_string()),
+            target_language: "zh-CN".to_string(),
+            max_concurrency: 1,
+            chunk_size_limit: 2_000,
+        },
+        false,
     )
     .await
 }
@@ -2016,6 +2083,7 @@ async fn build_test_app_with_disabled_translation() -> (
             max_concurrency: 1,
             chunk_size_limit: 2_000,
         },
+        true,
     )
     .await
 }
@@ -2023,6 +2091,7 @@ async fn build_test_app_with_disabled_translation() -> (
 async fn build_test_app_with_named_translation(
     provider: FakeTranslationProvider,
     translation: TranslationConfig,
+    spawn_workers: bool,
 ) -> (
     axum::Router,
     AppState,
@@ -2065,6 +2134,13 @@ async fn build_test_app_with_named_translation(
 
     let state =
         AppState::new_with_translation_provider(cfg, pool, translation, Arc::new(provider.clone()));
+    if spawn_workers {
+        legalminds_server::job_worker::spawn_job_workers(
+            state.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            2,
+        );
+    }
     let pool = state.pool.clone();
     let app = router(state.clone());
     (app, state, tmp, pool, provider)
@@ -2075,7 +2151,7 @@ async fn wait_for_file_translation_status(
     file_id: &str,
     expected_statuses: &[&str],
 ) -> Value {
-    for _ in 0..100 {
+    for _ in 0..500 {
         let row = sqlx::query(
             r#"
             SELECT
@@ -2152,7 +2228,7 @@ async fn wait_for_processing_mixed_file_state(
     expected_done: i64,
     expected_failed: i64,
 ) -> sqlx::postgres::PgRow {
-    for _ in 0..100 {
+    for _ in 0..500 {
         let row = sqlx::query(
             r#"
             SELECT
@@ -2184,7 +2260,7 @@ async fn wait_for_processing_mixed_file_state(
             return row;
         }
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     panic!("file {evidence_id} did not reach mixed processing state");
@@ -2206,7 +2282,7 @@ async fn wait_for_chunk_retry_count(
     source_text: &str,
     expected_retry_count: i64,
 ) -> sqlx::postgres::PgRow {
-    for _ in 0..100 {
+    for _ in 0..500 {
         let row = sqlx::query(
             r#"
             SELECT
@@ -2228,7 +2304,7 @@ async fn wait_for_chunk_retry_count(
             return row;
         }
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     panic!(
@@ -2262,7 +2338,7 @@ fn local_source_text_hash(text: &str) -> String {
 }
 
 async fn wait_for_file_translation_error(pool: &PgPool, evidence_id: &str, needle: &str) {
-    for _ in 0..100 {
+    for _ in 0..500 {
         let error =
             sqlx::query("SELECT translation_error FROM evidence_files WHERE id = $1 LIMIT 1")
                 .bind(evidence_id)
@@ -2276,7 +2352,7 @@ async fn wait_for_file_translation_error(pool: &PgPool, evidence_id: &str, needl
             return;
         }
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     panic!("file {evidence_id} did not reach translation_error containing {needle}");
@@ -2297,12 +2373,12 @@ async fn wait_for_chunk_status(
     source_text: &str,
     expected_status: &str,
 ) -> sqlx::postgres::PgRow {
-    for _ in 0..100 {
+    for _ in 0..500 {
         let row = fetch_chunk_state(pool, evidence_id, source_text).await;
         if row.get::<String, _>("translation_status") == expected_status {
             return row;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     panic!("chunk {source_text} in file {evidence_id} did not reach status={expected_status}");

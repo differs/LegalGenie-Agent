@@ -182,6 +182,13 @@ pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, PgPool) {
 
     let state = AppState::new(cfg, pool);
     let pool = state.pool.clone();
+    // P1b: parse/translate now run through the durable job queue; give tests a
+    // real worker so parsing completes without manual intervention.
+    legalminds_server::job_worker::spawn_job_workers(
+        state.clone(),
+        tokio_util::sync::CancellationToken::new(),
+        2,
+    );
     (router(state), tmp, pool)
 }
 

@@ -83,14 +83,26 @@ pub async fn enqueue_parse(state: AppState, file_id: String, force: bool) -> any
         return Ok(false);
     }
 
-    tokio::spawn(async move {
-        if let Err(e) = parse_and_update(&state, &file_id).await {
-            tracing::error!(file_id = %file_id, error = %e, "parse failed");
-            let _ = mark_failed(&state.pool, &file_id, &e.to_string()).await;
-        }
-    });
+    crate::jobs::enqueue_job(
+        &state.pool,
+        crate::jobs::JobKind::Parse,
+        None,
+        &file_id,
+        serde_json::json!({ "force": force }),
+    )
+    .await?;
 
     Ok(true)
+}
+
+/// Executed by the job worker: runs the parse pipeline and syncs the file
+/// status. The worker owns retry/dead-letter bookkeeping.
+pub async fn run_parse_job(state: &AppState, file_id: &str) -> anyhow::Result<()> {
+    if let Err(e) = parse_and_update(state, file_id).await {
+        let _ = mark_failed(&state.pool, file_id, &e.to_string()).await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 async fn mark_processing(pool: &PgPool, file_id: &str, force: bool) -> anyhow::Result<bool> {
@@ -1207,11 +1219,13 @@ fn transcribe_with_whisper_rs(
 }
 
 async fn run_cmd_capture_stdout(cmd: &str, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new(cmd)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("run {}", cmd))?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(parser_cmd_timeout_secs()),
+        Command::new(cmd).args(args).output(),
+    )
+    .await
+    .with_context(|| format!("run {} timed out", cmd))?
+    .with_context(|| format!("run {}", cmd))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1356,4 +1370,11 @@ mod tests {
             );
         }
     }
+}
+
+fn parser_cmd_timeout_secs() -> u64 {
+    std::env::var("PARSER_CMD_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
 }

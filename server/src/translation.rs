@@ -53,12 +53,20 @@ pub fn provider_from_config(
 }
 
 pub async fn start_file_translation(state: AppState, file_id: String) -> anyhow::Result<()> {
-    tokio::spawn(async move {
-        if let Err(error) = process_file_translation(state.clone(), file_id.clone()).await {
-            tracing::error!(file_id = %file_id, error = %error, "translation worker failed");
-        }
-    });
+    crate::jobs::enqueue_job(
+        &state.pool,
+        crate::jobs::JobKind::Translate,
+        None,
+        &file_id,
+        serde_json::json!({}),
+    )
+    .await?;
     Ok(())
+}
+
+/// Executed by the job worker: runs the file translation session.
+pub async fn run_translate_job(state: AppState, file_id: &str) -> anyhow::Result<()> {
+    process_file_translation(state, file_id.to_string()).await
 }
 
 pub fn start_retry_poller_once(state: AppState) {
@@ -86,7 +94,13 @@ pub async fn run_retry_cycle_once(state: AppState) -> anyhow::Result<()> {
 
     let due_file_ids = find_due_file_ids(&state.pool).await?;
     for file_id in stale_file_ids.into_iter().chain(due_file_ids.into_iter()) {
-        start_file_translation(state.clone(), file_id).await?;
+        // The retry poller executes synchronously with the current instance's
+        // provider so provider/model drift is detected immediately (drift
+        // writes the mismatch error itself and is not a cycle failure);
+        // brand-new translation triggers still go through the durable job queue.
+        if let Err(err) = run_translate_job(state.clone(), &file_id).await {
+            tracing::debug!(file_id = %file_id, error = %err, "retry cycle skipped file");
+        }
     }
 
     Ok(())

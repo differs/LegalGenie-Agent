@@ -1,7 +1,7 @@
 # LegalGenie Agent 企业级升级规划
 
 Last updated: 2026-08-10
-状态：**Phase 0 已完成（2026-08-10）**，规划供后续阶段评审
+状态：**Phase 0 + P1 完成（2026-08-10）**：P1a PostgreSQL 迁移、P1b 可靠任务执行均已交付；P2 Agent 运行时待启动
 范围：后端（`server/`）为主，前端仅在 Phase 2 涉及流式消费改造
 
 ---
