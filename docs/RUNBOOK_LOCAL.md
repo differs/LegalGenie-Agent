@@ -1,14 +1,13 @@
 # LegalGenie Agent Local Runbook (Dev)
 
-This repo runs a Rust backend + a Dioxus frontend.
+This repo runs a Rust backend + a React Web frontend (`web/`, Vite + Bun + Tailwind CSS).
 
 Some file parsing features depend on external command-line tools. If those tools are missing, the server will still start, but parsing for that file type will fail.
 
 ## 1) Prerequisites
 
 - Rust toolchain (stable)
-- Rust target: `wasm32-unknown-unknown` (for web builds)
-- `dioxus-cli` 0.7.3 (for `dx serve --platform web`)
+- Bun (`bun`) for the Web frontend
 - SQLite (bundled via `sqlx` for Rust; no external service needed)
 - Optional but recommended external tools:
   - Poppler utils: `pdftotext`, `pdfinfo` (PDF parsing)
@@ -126,7 +125,7 @@ Test note:
 SERVER_PORT=8001 cargo run -p legalminds-server
 ```
 
-Note: frontend default API base is `http://127.0.0.1:8001`. `.env.example` still starts at `SERVER_PORT=8000`, so for local dev you should either set `SERVER_PORT=8001` inside `.env` or always use the explicit `SERVER_PORT=8001 ...` command shown here.
+Note: the Web frontend's default API base is `http://127.0.0.1:8001`. `.env.example` still starts at `SERVER_PORT=8000`, so for local dev you should either set `SERVER_PORT=8001` inside `.env` or always use the explicit `SERVER_PORT=8001 ...` command shown here.
 
 Health check:
 
@@ -136,20 +135,17 @@ curl -s http://127.0.0.1:8001/api/v1/health
 
 ## 6) Run Frontend
 
-Desktop:
-
 ```bash
-cargo run -p legalminds-frontend --no-default-features --features desktop
+cd web
+bun install
+bun dev
 ```
 
-Web (requires `dioxus-cli`):
+The frontend connects to `http://127.0.0.1:8001/api/v1` by default. Override with:
 
 ```bash
-cargo install dioxus-cli --version 0.7.3
-dx serve
+VITE_API_BASE_URL=http://127.0.0.1:8001/api/v1
 ```
-
-Run `dx serve` from the repository root so the root `Dioxus.toml` can locate `legalminds-frontend`.
 
 ## 6.1) Bilingual Evidence Notes
 

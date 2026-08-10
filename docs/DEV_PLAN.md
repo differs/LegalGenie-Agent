@@ -67,7 +67,7 @@ Goal: keep user in the Timeline workspace and use chat tools for most other oper
   - `scripts/backup_local.sh`
   - `scripts/restore_backup.sh`
 - CI:
-  - `.github/workflows/ci.yml` runs server tests + frontend wasm build
+  - `.github/workflows/ci.yml` runs server tests
 - Acceptance:
   - `scripts/acceptance_api_smoke.sh`
   - `docs/ACCEPTANCE_API_SMOKE.md`

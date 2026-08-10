@@ -79,17 +79,22 @@ Implemented modules and representative endpoints (see README for the full list):
 
 ## What Is Implemented (Front-End)
 
-Current frontend (Dioxus) is still closer to a developer console overall, but the Timeline page is now a chat-first workspace:
+The Dioxus client has been removed; the Web frontend (`web/`, Vite + React + Tailwind CSS + Bun) is the only client.
+
+The previous Dioxus implementation (now removed) had wired:
 
 - Tabs: Cases, Files, Timeline, Persons, Search, Exports, Logs
-- Basic UIs are wired for:
-  - Timeline workspace: drag/zoom canvas (cursor-centered wheel zoom), drag-to-move with execute-mode gating + undo, selection + context lock, viewport culling + load-more up to 500 nodes, chat tools (nodes + evidence links + files + persons + search + exports) with preview -> confirm for writes
-  - Persons: list/create, detail (notes), link person to another case (minimal)
-  - Persons (case-local): dedupe suggestions + merge + relationships list/create/delete + lightweight SVG relationship graph view (chat-first)
-  - Search: multi-object search + suggestions + history
-- Still missing from the requirement docs' "core product UX":
-  - Timeline advanced canvas behaviors (grouping, richer conflict hints, etc.)
-  - Person split flows; advanced relationship graph visualization/editing (pan/zoom/drag + graph-based CRUD)
+- Timeline workspace: drag/zoom canvas (cursor-centered wheel zoom), drag-to-move with execute-mode gating + undo, selection + context lock, viewport culling + load-more up to 500 nodes, chat tools (nodes + evidence links + files + persons + search + exports) with preview -> confirm for writes
+- Persons: list/create, detail (notes), link person to another case (minimal)
+- Persons (case-local): dedupe suggestions + merge + relationships list/create/delete + lightweight SVG relationship graph view (chat-first)
+- Search: multi-object search + suggestions + history
+
+The React Web frontend currently provides a landing/overview page plus a workbench concept page; the API-facing workspace pages are to be (re)built on top of these.
+
+Still missing from the requirement docs' "core product UX":
+
+- Timeline advanced canvas behaviors (grouping, richer conflict hints, etc.)
+- Person split flows; advanced relationship graph visualization/editing (pan/zoom/drag + graph-based CRUD)
 
 ## Key Gaps (Docs vs Code)
 

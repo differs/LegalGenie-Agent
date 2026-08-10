@@ -17,13 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY server/Cargo.toml server/Cargo.toml
 COPY shared/Cargo.toml shared/Cargo.toml
-COPY frontend/Cargo.toml frontend/Cargo.toml
 
 # Dummy sources so `cargo fetch` can run without copying the full repo.
-RUN mkdir -p server/src shared/src frontend/src \
+RUN mkdir -p server/src shared/src \
   && printf "fn main(){}\n" > server/src/main.rs \
-  && printf "pub fn _dummy(){}\n" > shared/src/lib.rs \
-  && printf "fn main(){}\n" > frontend/src/main.rs
+  && printf "pub fn _dummy(){}\n" > shared/src/lib.rs
 
 RUN cargo fetch
 

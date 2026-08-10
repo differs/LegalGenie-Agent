@@ -2,10 +2,8 @@
 /target/
 **/*.rs.bk
 
-# Dioxus / web build artifacts
+# Web build artifacts
 /dist/
-/frontend/dist/
-/frontend/target/
 
 # Env files
 .env

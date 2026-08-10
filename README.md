@@ -4,7 +4,7 @@
 
 ## 中文
 
-LegalGenie Agent 是一个面向律师、法务与争议团队的开源法律工作台。项目当前包含 Rust 后端、Dioxus 客户端，以及一个基于 `Vite + Bun + Tailwind CSS + React` 的现代 Web 前端。
+LegalGenie Agent 是一个面向律师、法务与争议团队的开源法律工作台。项目包含 Rust 后端与基于 `Vite + Bun + Tailwind CSS + React` 的现代 Web 前端。
 
 ### 核心能力
 
@@ -19,8 +19,7 @@ LegalGenie Agent 是一个面向律师、法务与争议团队的开源法律工
 
 - 后端：Axum + Tokio + SQLx + SQLite
 - 共享模型：Rust workspace
-- 现有客户端：Dioxus（Web + Desktop）
-- 新 Web 前端：Vite + React + Tailwind CSS + Bun
+- Web 前端：Vite + React + Tailwind CSS + Bun
 
 ### 快速开始
 
@@ -50,21 +49,6 @@ bun dev
 VITE_API_BASE_URL=http://127.0.0.1:8001/api/v1
 ```
 
-### 其他运行方式
-
-- Dioxus Desktop：
-
-```bash
-cargo run -p legalminds-frontend --no-default-features --features desktop
-```
-
-- Dioxus Web：
-
-```bash
-cargo install dioxus-cli --version 0.7.3
-dx serve
-```
-
 ### 已接通的 Web API
 
 - `GET /api/v1/health`
@@ -75,7 +59,7 @@ dx serve
 
 ## English
 
-LegalGenie Agent is an open-source legal workspace for law firms, in-house legal teams, and dispute-resolution workflows. The repository currently includes a Rust backend, a Dioxus client, and a modern Web frontend built with `Vite + Bun + Tailwind CSS + React`.
+LegalGenie Agent is an open-source legal workspace for law firms, in-house legal teams, and dispute-resolution workflows. The repository includes a Rust backend and a modern Web frontend built with `Vite + Bun + Tailwind CSS + React`.
 
 ### Highlights
 
@@ -90,8 +74,7 @@ LegalGenie Agent is an open-source legal workspace for law firms, in-house legal
 
 - Backend: Axum + Tokio + SQLx + SQLite
 - Shared models: Rust workspace crates
-- Existing client: Dioxus (Web + Desktop)
-- New Web frontend: Vite + React + Tailwind CSS + Bun
+- Web frontend: Vite + React + Tailwind CSS + Bun
 
 ### Quick Start
 
@@ -119,21 +102,6 @@ By default, `web/` connects to `http://127.0.0.1:8001/api/v1`. Override it with:
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:8001/api/v1
-```
-
-### Other Clients
-
-- Dioxus Desktop:
-
-```bash
-cargo run -p legalminds-frontend --no-default-features --features desktop
-```
-
-- Dioxus Web:
-
-```bash
-cargo install dioxus-cli --version 0.7.3
-dx serve
 ```
 
 ### Connected Web API Routes
