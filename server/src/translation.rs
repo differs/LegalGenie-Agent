@@ -434,6 +434,10 @@ async fn translate_claimed_chunk(
             Ok(())
         }
         Err(error) => {
+            let error_text = crate::config::redact_secret(
+                &error.to_string(),
+                state.translation.api_key.as_deref().unwrap_or(""),
+            );
             tracing::warn!(
                 file_id = %chunk.row.evidence_id,
                 chunk_id = %chunk.row.id,
@@ -441,10 +445,10 @@ async fn translate_claimed_chunk(
                 provider = %state.translation_provider.provider_name(),
                 model = ?effective_model_name(&state),
                 retry_count = chunk.row.retry_count,
-                error = %error,
+                error = %error_text,
                 "translation provider returned error"
             );
-            mark_chunk_failed(&state.pool, &chunk, session, &error.to_string()).await?;
+            mark_chunk_failed(&state.pool, &chunk, session, &error_text).await?;
             Ok(())
         }
     }

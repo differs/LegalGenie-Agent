@@ -69,14 +69,25 @@ fn encode_jwt(secret: &str, claims: &Claims) -> AppResult<String> {
     .map_err(|e| AppError::internal(format!("jwt encode failed: {e}")))
 }
 
-fn decode_jwt(secret: &str, token: &str) -> AppResult<Claims> {
-    let data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &jwt_validation(),
-    )
-    .map_err(|_| AppError::unauthorized_code(401001, "invalid token"))?;
-    Ok(data.claims)
+fn decode_jwt(secret: &str, old_secret: Option<&str>, token: &str) -> AppResult<Claims> {
+    let try_secret = |s: &str| {
+        decode::<Claims>(
+            token,
+            &DecodingKey::from_secret(s.as_bytes()),
+            &jwt_validation(),
+        )
+        .map(|d| d.claims)
+    };
+
+    // Try the active secret first; fall back to the previous one during a
+    // rotation window so tokens minted before the rotation keep working.
+    try_secret(secret)
+        .or_else(|_| {
+            old_secret
+                .map(try_secret)
+                .unwrap_or_else(|| Err(jsonwebtoken::errors::ErrorKind::InvalidToken.into()))
+        })
+        .map_err(|_| AppError::unauthorized_code(401001, "invalid token"))
 }
 
 fn build_access_claims(
@@ -380,12 +391,13 @@ async fn login(
 
     let ip = meta.ip_address.as_deref().unwrap_or("unknown").to_string();
     let key = format!("login:{}:{}", ip, ident.to_ascii_lowercase());
-    let allowed = state
+    let (allowed, retry_after) = state
         .rate_limiter
         .check_and_record(&key, 5, StdDuration::from_secs(15 * 60))
         .await;
     if !allowed {
-        return Err(AppError::too_many_requests(
+        return Err(AppError::too_many_requests_with_retry(
+            Some(retry_after),
             "too many login attempts, please try again later",
         ));
     }
@@ -491,7 +503,11 @@ async fn refresh(
     State(state): State<AppState>,
     Json(req): Json<RefreshRequest>,
 ) -> AppResult<Json<ApiEnvelope<RefreshResponseData>>> {
-    let claims = decode_jwt(&state.config.jwt_secret, &req.refresh_token)?;
+    let claims = decode_jwt(
+        &state.config.jwt_secret,
+        state.config.jwt_secret_old.as_deref(),
+        &req.refresh_token,
+    )?;
     if claims.token_type != TokenType::Refresh {
         return Err(AppError::unauthorized_code(401001, "invalid token"));
     }
@@ -675,7 +691,11 @@ impl FromRequestParts<AppState> for AuthUser {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| AppError::unauthorized("missing bearer token"))?;
 
-        let claims = decode_jwt(&state.config.jwt_secret, auth_header)?;
+        let claims = decode_jwt(
+            &state.config.jwt_secret,
+            state.config.jwt_secret_old.as_deref(),
+            auth_header,
+        )?;
         if claims.token_type != TokenType::Access {
             return Err(AppError::unauthorized_code(401001, "invalid token"));
         }
@@ -694,3 +714,52 @@ impl FromRequestParts<AppState> for AuthUser {
 // Ensure we don't accidentally return a 200 on a handler that forgot to wrap `AppResult`.
 #[allow(dead_code)]
 fn _assert_auth_router_state(_: Router<AppState>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+
+    fn sample_claims() -> Claims {
+        let now = Utc::now();
+        Claims {
+            sub: "11111111-2222-3333-4444-555555555555".to_string(),
+            username: "rotation_test".to_string(),
+            roles: vec!["host_lawyer".to_string()],
+            token_type: TokenType::Access,
+            refresh_token_version: None,
+            exp: (now + ChronoDuration::minutes(30)).timestamp() as usize,
+            iat: now.timestamp() as usize,
+        }
+    }
+
+    #[test]
+    fn old_secret_verifies_tokens_during_rotation() {
+        let old_secret = "old-secret-abcdefghijklmnopqrstuvwxyz0123456789";
+        let new_secret = "new-secret-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let claims = sample_claims();
+
+        // Token minted with the old secret.
+        let token = encode_jwt(old_secret, &claims).expect("encode with old secret");
+
+        // Verification with the new secret alone fails…
+        assert!(decode_jwt(new_secret, None, &token).is_err());
+        // …but succeeds while the old secret is still in the rotation window.
+        let decoded = decode_jwt(new_secret, Some(old_secret), &token).expect("decode via old");
+        assert_eq!(decoded.sub, claims.sub);
+
+        // Tokens minted with the new secret verify with the new secret.
+        let new_token = encode_jwt(new_secret, &claims).expect("encode with new secret");
+        let decoded = decode_jwt(new_secret, Some(old_secret), &new_token).expect("decode via new");
+        assert_eq!(decoded.username, claims.username);
+    }
+
+    #[test]
+    fn wrong_secrets_are_rejected() {
+        let secret = "correct-horse-battery-staple-0123456789abcdef";
+        let token = encode_jwt(secret, &sample_claims()).expect("encode");
+
+        assert!(decode_jwt("wrong-secret-0123456789abcdefghijklmnop", None, &token).is_err());
+        assert!(decode_jwt(secret, None, "garbage.token.value").is_err());
+    }
+}

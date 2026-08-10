@@ -14,7 +14,11 @@ pub enum AppError {
     BadRequest { message: String, error_code: i32 },
 
     #[error("{message}")]
-    TooManyRequests { message: String, error_code: i32 },
+    TooManyRequests {
+        message: String,
+        error_code: i32,
+        retry_after_secs: Option<u64>,
+    },
 
     #[error("{message}")]
     Unauthorized { message: String, error_code: i32 },
@@ -47,11 +51,16 @@ impl AppError {
         }
     }
 
-    pub fn too_many_requests(message: impl Into<String>) -> Self {
+    /// Rate-limited response that also advertises when the client may retry.
+    pub fn too_many_requests_with_retry(
+        retry_after_secs: Option<u64>,
+        message: impl Into<String>,
+    ) -> Self {
         // Align with docs: AUTH_TOO_MANY_ATTEMPTS (400104)
         Self::TooManyRequests {
             message: message.into(),
             error_code: 400104,
+            retry_after_secs,
         }
     }
 
@@ -122,7 +131,26 @@ impl IntoResponse for AppError {
             AppError::TooManyRequests {
                 message,
                 error_code,
-            } => (StatusCode::TOO_MANY_REQUESTS, message, error_code),
+                retry_after_secs,
+            } => {
+                let mut resp = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ApiEnvelope::err(
+                        StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                        error_code,
+                        message,
+                    )),
+                )
+                    .into_response();
+                if let Some(secs) = retry_after_secs {
+                    resp.headers_mut().insert(
+                        "retry-after",
+                        axum::http::HeaderValue::from_str(&secs.to_string())
+                            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("60")),
+                    );
+                }
+                return resp;
+            }
             AppError::Unauthorized {
                 message,
                 error_code,

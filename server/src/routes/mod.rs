@@ -50,6 +50,10 @@ pub fn router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer(&state))
         .layer(from_fn_with_state(state.clone(), security_headers))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::idempotency::idempotency_middleware,
+        ))
 }
 
 fn cors_layer(state: &AppState) -> CorsLayer {

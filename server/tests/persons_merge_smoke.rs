@@ -224,6 +224,7 @@ async fn build_test_app() -> (axum::Router, TempDir) {
         force_https: false,
         trust_proxy_headers: false,
         jwt_secret: "test-secret-please-change-32-chars-min".to_string(),
+        jwt_secret_old: None,
         access_token_expire_minutes: 60,
         refresh_token_expire_days: 7,
         storage_path: storage_path.to_string_lossy().to_string(),

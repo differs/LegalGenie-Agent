@@ -25,6 +25,9 @@ pub struct AppConfig {
     pub force_https: bool,
     pub trust_proxy_headers: bool,
     pub jwt_secret: String,
+    /// Optional previous signing secret kept during a rotation window;
+    /// tokens signed with it are still accepted for verification.
+    pub jwt_secret_old: Option<String>,
     pub access_token_expire_minutes: i64,
     pub refresh_token_expire_days: i64,
     pub storage_path: String,
@@ -73,7 +76,7 @@ impl TranslationConfig {
         let defaults = Self::default();
         let provider = env_string("TRANSLATION_PROVIDER", &defaults.provider);
         let base_url = env_optional_string("TRANSLATION_BASE_URL");
-        let api_key = env_optional_string("TRANSLATION_API_KEY");
+        let api_key = translation_api_key_from_env()?;
         let model = env_optional_string("TRANSLATION_MODEL");
         let target_language = env_string("TRANSLATION_TARGET_LANGUAGE", &defaults.target_language);
         let max_concurrency = env_u16("TRANSLATION_MAX_CONCURRENCY", defaults.max_concurrency)?;
@@ -98,6 +101,26 @@ impl TranslationConfig {
     }
 }
 
+/// Loads the translation API key from `TRANSLATION_API_KEY` or, if that is
+/// unset, from the file pointed to by `TRANSLATION_API_KEY_FILE` (file
+/// contents are trimmed). The file variant is the recommended way to inject
+/// secrets in container/k8s deployments.
+fn translation_api_key_from_env() -> anyhow::Result<Option<String>> {
+    if let Some(key) = env_optional_string("TRANSLATION_API_KEY") {
+        return Ok(Some(key));
+    }
+    let Some(path) = env_optional_string("TRANSLATION_API_KEY_FILE") else {
+        return Ok(None);
+    };
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("failed to read TRANSLATION_API_KEY_FILE {path}: {e}"))?;
+    let key = content.trim().to_string();
+    if key.is_empty() {
+        anyhow::bail!("TRANSLATION_API_KEY_FILE {path} is empty");
+    }
+    Ok(Some(key))
+}
+
 impl AppConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let app_env = AppEnv::from_str(&env_string("APP_ENV", "development"));
@@ -107,6 +130,7 @@ impl AppConfig {
         let force_https = env_bool("FORCE_HTTPS", false)?;
         let trust_proxy_headers = env_bool("TRUST_PROXY_HEADERS", false)?;
         let jwt_secret = env_string("JWT_SECRET", "change-me-to-a-long-random-secret");
+        let jwt_secret_old = env_optional_string("JWT_SECRET_OLD");
         let access_token_expire_minutes = env_i64("ACCESS_TOKEN_EXPIRE_MINUTES", 60)?;
         let refresh_token_expire_days = env_i64("REFRESH_TOKEN_EXPIRE_DAYS", 7)?;
         let storage_path = env_string("STORAGE_PATH", "./storage");
@@ -139,6 +163,7 @@ impl AppConfig {
             force_https,
             trust_proxy_headers,
             jwt_secret,
+            jwt_secret_old,
             access_token_expire_minutes,
             refresh_token_expire_days,
             storage_path,
@@ -175,9 +200,46 @@ impl AppConfig {
             if !self.force_https {
                 anyhow::bail!("FORCE_HTTPS must be enabled in production");
             }
+
+            if let Some(old) = self.jwt_secret_old.as_deref() {
+                let old = old.trim();
+                if old == "change-me-to-a-long-random-secret" || old.len() < 32 {
+                    anyhow::bail!(
+                        "JWT_SECRET_OLD must be at least 32 chars and not the default value in production"
+                    );
+                }
+            }
         }
 
         Ok(())
+    }
+}
+
+/// Redacts a secret value from log/error text, replacing it with `[REDACTED]`.
+/// Useful before persisting or logging any message that may echo credentials.
+pub fn redact_secret(text: &str, secret: &str) -> String {
+    let secret = secret.trim();
+    if secret.is_empty() || secret.len() < 8 {
+        return text.to_string();
+    }
+    text.replace(secret, "[REDACTED]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_secret_masks_matching_value() {
+        let out = redact_secret("request with key sk-abc12345 tail", "sk-abc12345");
+        assert_eq!(out, "request with key [REDACTED] tail");
+        assert!(!out.contains("sk-abc12345"));
+    }
+
+    #[test]
+    fn redact_secret_ignores_short_secrets() {
+        assert_eq!(redact_secret("k=ab token", "ab"), "k=ab token");
+        assert_eq!(redact_secret("no secret", ""), "no secret");
     }
 }
 

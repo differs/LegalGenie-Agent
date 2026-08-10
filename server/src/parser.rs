@@ -94,10 +94,14 @@ pub async fn enqueue_parse(state: AppState, file_id: String, force: bool) -> any
 }
 
 async fn mark_processing(pool: &SqlitePool, file_id: &str, force: bool) -> anyhow::Result<bool> {
+    // Without `force` we only start parsing files that are pending or failed,
+    // so a duplicate request cannot re-parse an already parsed file.
+    // With `force` (explicit user action) any non-processing state may be
+    // reset and re-parsed, but an in-flight parse is still never double-run.
     let sql = if force {
         "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = ?1 AND status != 'deleted' AND parse_status != 'processing'"
     } else {
-        "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = ?1 AND status != 'deleted' AND parse_status != 'processing'"
+        "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = ?1 AND status != 'deleted' AND parse_status IN ('pending', 'failed')"
     };
 
     let res = sqlx::query(sql)
