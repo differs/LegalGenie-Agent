@@ -1,10 +1,10 @@
 @import 'tailwindcss';
 
 @theme {
-  --color-ink-950: #070d17;
-  --color-ink-900: #0d1624;
-  --color-ink-800: #132033;
-  --color-amber-300: #d6b26f;
+  --color-ink-950: #101316;
+  --color-ink-900: #171d22;
+  --color-ink-800: #20272d;
+  --color-amber-300: #d0aa63;
   --font-sans:
     'IBM Plex Sans', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei',
     sans-serif;
@@ -13,9 +13,9 @@
 }
 
 :root {
-  color: #e2e8f0;
+  color: #f5f5f4;
   background:
-    linear-gradient(180deg, rgba(7, 13, 23, 1) 0%, rgba(7, 13, 23, 1) 100%);
+    linear-gradient(180deg, rgba(16, 19, 22, 1) 0%, rgba(16, 19, 22, 1) 100%);
   font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -32,8 +32,8 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background:
-    radial-gradient(circle at top, rgba(214, 178, 111, 0.08), transparent 30%),
-    linear-gradient(180deg, #070d17 0%, #09111d 100%);
+    radial-gradient(circle at top, rgba(214, 178, 111, 0.08), transparent 32%),
+    linear-gradient(180deg, #101316 0%, #171d22 100%);
 }
 
 * {
@@ -47,24 +47,4 @@ body {
 button,
 input {
   font: inherit;
-}
-
-.glass-panel {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
-  box-shadow:
-    0 24px 80px rgba(3, 8, 17, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(22px);
-  border-radius: 28px;
-}
-
-.eyebrow {
-  margin: 0;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.24em;
-  text-transform: uppercase;
-  color: rgba(226, 232, 240, 0.56);
 }

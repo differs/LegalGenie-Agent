@@ -14,12 +14,13 @@ LegalGenie Agent 是一个面向律师、法务与争议团队的开源法律工
 - 人物与关系：案件内人物管理、去重建议、关系维护
 - 审计与导出：操作日志、证据清单导出、时间轴导出
 - 开源 Web 前端：可直接连接现有 API 的多页面工作台
+- 聊天优先交互：自然语言驱动 Agent，写操作「预览 → 确认」后执行，viewer 角色只读
 
 ### 技术栈
 
 - 后端：Axum + Tokio + SQLx + SQLite
 - 共享模型：Rust workspace
-- Web 前端：Vite + React + Tailwind CSS + Bun
+- Web 前端：Vite + React + Tailwind CSS + Bun + react-router
 
 ### 快速开始
 
@@ -69,12 +70,13 @@ LegalGenie Agent is an open-source legal workspace for law firms, in-house legal
 - Person and relationship management inside each case
 - Audit logs and export workflows
 - A standalone open-source Web frontend wired to the existing API
+- Chat-first interaction: natural-language agent with preview-then-confirm writes, viewer role is read-only
 
 ### Stack
 
 - Backend: Axum + Tokio + SQLx + SQLite
 - Shared models: Rust workspace crates
-- Web frontend: Vite + React + Tailwind CSS + Bun
+- Web frontend: Vite + React + Tailwind CSS + Bun + react-router
 
 ### Quick Start
 
