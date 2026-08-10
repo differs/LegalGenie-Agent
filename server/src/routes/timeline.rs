@@ -157,7 +157,7 @@ async fn update_node(
         .map_err(|e| AppError::internal(format!("db error: {e}")))?;
     if new_event_time != existing_event_time {
         let next_sort: (i64,) = sqlx::query_as(
-            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM event_nodes WHERE case_id = ?1 AND event_time = ?2 AND status != 'deleted'",
+            "SELECT COALESCE(MAX(sort_order), 0)::bigint + 1 FROM event_nodes WHERE case_id = $1 AND event_time = $2 AND status != 'deleted'",
         )
         .bind(&existing_case_id)
         .bind(&new_event_time)
@@ -170,8 +170,8 @@ async fn update_node(
     sqlx::query(
         r#"
         UPDATE event_nodes
-        SET title = ?1, description = ?2, event_time = ?3, sort_order = ?4, tags = ?5, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?6 AND status != 'deleted'
+        SET title = $1, description = $2, event_time = $3, sort_order = $4, tags = $5, updated_at = utc_text()
+        WHERE id = $6 AND status != 'deleted'
         "#,
     )
     .bind(&new_title)
@@ -277,7 +277,7 @@ async fn move_node(
         Some(v) => v,
         None => {
             let next_sort: (i64,) = sqlx::query_as(
-                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM event_nodes WHERE case_id = ?1 AND event_time = ?2 AND status != 'deleted'",
+                "SELECT COALESCE(MAX(sort_order), 0)::bigint + 1 FROM event_nodes WHERE case_id = $1 AND event_time = $2 AND status != 'deleted'",
             )
             .bind(&existing.case_id)
             .bind(&new_time)
@@ -289,7 +289,7 @@ async fn move_node(
     };
 
     sqlx::query(
-        "UPDATE event_nodes SET event_time = ?1, sort_order = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3 AND status != 'deleted'",
+        "UPDATE event_nodes SET event_time = $1, sort_order = $2, updated_at = utc_text() WHERE id = $3 AND status != 'deleted'",
     )
     .bind(&new_time)
     .bind(new_sort_order)
@@ -365,7 +365,7 @@ async fn delete_node(
     });
 
     sqlx::query(
-        "UPDATE event_nodes SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status != 'deleted'",
+        "UPDATE event_nodes SET status = 'deleted', updated_at = utc_text() WHERE id = $1 AND status != 'deleted'",
     )
     .bind(&existing.id)
     .execute(&state.pool)
@@ -408,7 +408,7 @@ async fn link_evidence(
     let evidence_id = normalize_uuid(&req.evidence_id, "invalid evidence id")?;
 
     let evidence: Option<(String, String)> = sqlx::query_as(
-        "SELECT case_id, original_name FROM evidence_files WHERE id = ?1 AND status != 'deleted' LIMIT 1",
+        "SELECT case_id, original_name FROM evidence_files WHERE id = $1 AND status != 'deleted' LIMIT 1",
     )
     .bind(&evidence_id)
     .fetch_optional(&state.pool)
@@ -435,7 +435,7 @@ async fn link_evidence(
     sqlx::query(
         r#"
         INSERT INTO node_evidence_links (id, node_id, evidence_id, anchor_type, anchor_data)
-        VALUES (?1, ?2, ?3, ?4, ?5)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
     )
     .bind(link_id.to_string())
@@ -501,7 +501,7 @@ async fn unlink_evidence(
         SELECT l.evidence_id, l.anchor_type, l.anchor_data, e.original_name
         FROM node_evidence_links l
         JOIN evidence_files e ON e.id = l.evidence_id
-        WHERE l.id = ?1 AND l.node_id = ?2 AND e.status != 'deleted'
+        WHERE l.id = $1 AND l.node_id = $2 AND e.status != 'deleted'
         LIMIT 1
         "#,
     )
@@ -511,7 +511,7 @@ async fn unlink_evidence(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    let deleted = sqlx::query("DELETE FROM node_evidence_links WHERE id = ?1 AND node_id = ?2")
+    let deleted = sqlx::query("DELETE FROM node_evidence_links WHERE id = $1 AND node_id = $2")
         .bind(&link_id)
         .bind(&node_id)
         .execute(&state.pool)
@@ -563,7 +563,7 @@ async fn fetch_node(state: &AppState, user: &AuthUser, node_id: &str) -> AppResu
         r#"
         SELECT id, case_id, title, description, event_time, sort_order, tags, status, created_at, updated_at
         FROM event_nodes
-        WHERE id = ?1 AND status != 'deleted'
+        WHERE id = $1 AND status != 'deleted'
         LIMIT 1
         "#,
     )
@@ -584,7 +584,7 @@ async fn fetch_node_read(state: &AppState, user: &AuthUser, node_id: &str) -> Ap
         r#"
         SELECT id, case_id, title, description, event_time, sort_order, tags, status, created_at, updated_at
         FROM event_nodes
-        WHERE id = ?1 AND status != 'deleted'
+        WHERE id = $1 AND status != 'deleted'
         LIMIT 1
         "#,
     )
@@ -601,7 +601,7 @@ async fn fetch_node_read(state: &AppState, user: &AuthUser, node_id: &str) -> Ap
 }
 
 async fn resequence_day_orders(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     case_id: &str,
     event_time: &str,
     prioritized_node_id: Option<&str>,
@@ -610,10 +610,10 @@ async fn resequence_day_orders(
         r#"
         SELECT id
         FROM event_nodes
-        WHERE case_id = ?1 AND event_time = ?2 AND status != 'deleted'
+        WHERE case_id = $1 AND event_time = $2 AND status != 'deleted'
         ORDER BY
             sort_order ASC,
-            CASE WHEN ?3 IS NOT NULL AND id = ?3 THEN 0 ELSE 1 END ASC,
+            CASE WHEN $3 IS NOT NULL AND id = $3 THEN 0 ELSE 1 END ASC,
             created_at ASC,
             id ASC
         "#,
@@ -628,7 +628,7 @@ async fn resequence_day_orders(
     for (index, (id,)) in rows.into_iter().enumerate() {
         let new_order = ((index as i64) + 1) * 100;
         sqlx::query(
-            "UPDATE event_nodes SET sort_order = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            "UPDATE event_nodes SET sort_order = $1, updated_at = utc_text() WHERE id = $2",
         )
         .bind(new_order)
         .bind(id)
@@ -657,7 +657,7 @@ async fn fetch_node_with_links(
             l.anchor_data
         FROM node_evidence_links l
         JOIN evidence_files e ON e.id = l.evidence_id
-        WHERE l.node_id = ?1 AND e.status != 'deleted'
+        WHERE l.node_id = $1 AND e.status != 'deleted'
         ORDER BY l.created_at ASC
         "#,
     )
@@ -716,7 +716,7 @@ async fn fetch_node_with_links_read(
             l.anchor_data
         FROM node_evidence_links l
         JOIN evidence_files e ON e.id = l.evidence_id
-        WHERE l.node_id = ?1 AND e.status != 'deleted'
+        WHERE l.node_id = $1 AND e.status != 'deleted'
         ORDER BY l.created_at ASC
         "#,
     )

@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN refresh_token_version BIGINT NOT NULL DEFAULT 0;

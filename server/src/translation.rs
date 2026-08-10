@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, PgPool};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration as StdDuration;
@@ -145,8 +145,8 @@ async fn initialize_file_translation(
                 ELSE 'done'
             END,
             translation_error = NULL,
-            target_language = ?1
-        WHERE id = ?2 AND status != 'deleted' AND parse_status = 'done' AND parsed_at = ?3
+            target_language = $1
+        WHERE id = $2 AND status != 'deleted' AND parse_status = 'done' AND parsed_at = $3
         "#,
     )
     .bind(&state.translation.target_language)
@@ -186,18 +186,18 @@ async fn mark_file_translation_disabled(
                 WHEN translation_status = 'done' THEN 'done'
                 ELSE 'failed'
             END,
-            target_language = ?1,
+            target_language = $1,
             translation_error = CASE
                 WHEN translation_status = 'done' THEN translation_error
-                ELSE ?2
+                ELSE $2
             END,
             next_retry_at = NULL,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE evidence_id = ?3
+            updated_at = utc_text()
+        WHERE evidence_id = $3
           AND EXISTS (
               SELECT 1
               FROM evidence_files
-              WHERE id = ?3 AND parsed_at = ?4 AND status != 'deleted'
+              WHERE id = $3 AND parsed_at = $4 AND status != 'deleted'
           )
         "#,
     )
@@ -214,21 +214,21 @@ async fn mark_file_translation_disabled(
         UPDATE evidence_files
         SET
             translation_status = 'failed',
-            translation_error = ?1,
-            target_language = ?2,
-            translation_provider = ?3,
-            translation_model = ?4,
+            translation_error = $1,
+            target_language = $2,
+            translation_provider = $3,
+            translation_model = $4,
             translated_chunk_count = (
                 SELECT COUNT(1)
                 FROM evidence_file_chunks
-                WHERE evidence_id = ?5 AND translation_status = 'done'
+                WHERE evidence_id = $5 AND translation_status = 'done'
             ),
             failed_chunk_count = (
                 SELECT COUNT(1)
                 FROM evidence_file_chunks
-                WHERE evidence_id = ?5 AND translation_status = 'failed'
+                WHERE evidence_id = $5 AND translation_status = 'failed'
             )
-        WHERE id = ?5 AND parsed_at = ?6
+        WHERE id = $5 AND parsed_at = $6
         "#,
     )
     .bind(error)
@@ -285,7 +285,7 @@ struct ClaimedTranslationChunk {
 }
 
 async fn claim_next_due_chunk(
-    pool: &SqlitePool,
+    pool: &PgPool,
     session: &TranslationSession,
 ) -> anyhow::Result<Option<ClaimedTranslationChunk>> {
     loop {
@@ -301,8 +301,8 @@ async fn claim_next_due_chunk(
                 c.max_retries
             FROM evidence_file_chunks c
             INNER JOIN evidence_files f ON f.id = c.evidence_id
-            WHERE c.evidence_id = ?1
-              AND f.parsed_at = ?2
+            WHERE c.evidence_id = $1
+              AND f.parsed_at = $2
               AND f.status != 'deleted'
               AND f.parse_status = 'done'
               AND (
@@ -313,7 +313,7 @@ async fn claim_next_due_chunk(
                             OR (
                                 c.retry_count <= c.max_retries
                                 AND c.next_retry_at IS NOT NULL
-                                AND c.next_retry_at <= CURRENT_TIMESTAMP
+                                AND c.next_retry_at <= utc_text()
                             )
                         )
                     )
@@ -321,7 +321,7 @@ async fn claim_next_due_chunk(
                     c.translation_status = 'failed'
                     AND c.retry_count <= c.max_retries
                     AND c.next_retry_at IS NOT NULL
-                    AND c.next_retry_at <= CURRENT_TIMESTAMP
+                    AND c.next_retry_at <= utc_text()
                  )
               )
             ORDER BY c.chunk_index ASC
@@ -344,11 +344,11 @@ async fn claim_next_due_chunk(
             UPDATE evidence_file_chunks
             SET
                 translation_status = 'processing',
-                last_attempt_at = ?2,
+                last_attempt_at = $1,
                 translation_error = NULL,
                 next_retry_at = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?1
+                updated_at = utc_text()
+            WHERE id = $2
               AND (
                     (
                         translation_status = 'pending'
@@ -357,7 +357,7 @@ async fn claim_next_due_chunk(
                             OR (
                                 retry_count <= max_retries
                                 AND next_retry_at IS NOT NULL
-                                AND next_retry_at <= CURRENT_TIMESTAMP
+                                AND next_retry_at <= utc_text()
                             )
                         )
                     )
@@ -365,21 +365,21 @@ async fn claim_next_due_chunk(
                     translation_status = 'failed'
                     AND retry_count <= max_retries
                     AND next_retry_at IS NOT NULL
-                    AND next_retry_at <= CURRENT_TIMESTAMP
+                    AND next_retry_at <= utc_text()
                  )
               )
               AND EXISTS (
                     SELECT 1
                     FROM evidence_files
                     WHERE id = evidence_file_chunks.evidence_id
-                      AND parsed_at = ?3
+                      AND parsed_at = $3
                       AND status != 'deleted'
                       AND parse_status = 'done'
               )
             "#,
         )
-        .bind(&row.id)
         .bind(&attempt_token)
+        .bind(&row.id)
         .bind(&session.parsed_at)
         .execute(pool)
         .await
@@ -455,7 +455,7 @@ async fn translate_claimed_chunk(
 }
 
 async fn mark_chunk_done(
-    pool: &SqlitePool,
+    pool: &PgPool,
     chunk: &ClaimedTranslationChunk,
     session: &TranslationSession,
     result: &TranslationResult,
@@ -470,23 +470,23 @@ async fn mark_chunk_done(
         r#"
         UPDATE evidence_file_chunks
         SET
-            translated_text = ?1,
-            source_language = ?2,
-            target_language = ?3,
+            translated_text = $1,
+            source_language = $2,
+            target_language = $3,
             translation_status = 'done',
             translation_error = NULL,
-            translated_at = CURRENT_TIMESTAMP,
+            translated_at = utc_text(),
             next_retry_at = NULL,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?4
-          AND evidence_id = ?5
+            updated_at = utc_text()
+        WHERE id = $4
+          AND evidence_id = $5
           AND translation_status = 'processing'
-          AND last_attempt_at = ?6
+          AND last_attempt_at = $6
           AND EXISTS (
               SELECT 1
               FROM evidence_files
-              WHERE id = ?5
-                AND parsed_at = ?7
+              WHERE id = $7
+                AND parsed_at = $8
                 AND status != 'deleted'
                 AND parse_status = 'done'
           )
@@ -498,6 +498,7 @@ async fn mark_chunk_done(
     .bind(&chunk.row.id)
     .bind(&chunk.row.evidence_id)
     .bind(&chunk.attempt_token)
+    .bind(&session.file_id)
     .bind(&session.parsed_at)
     .execute(pool)
     .await
@@ -515,7 +516,7 @@ async fn mark_chunk_done(
 }
 
 async fn mark_chunk_failed(
-    pool: &SqlitePool,
+    pool: &PgPool,
     chunk: &ClaimedTranslationChunk,
     session: &TranslationSession,
     error: &str,
@@ -532,19 +533,19 @@ async fn mark_chunk_failed(
         UPDATE evidence_file_chunks
         SET
             translation_status = 'failed',
-            retry_count = ?1,
-            next_retry_at = ?2,
-            translation_error = ?3,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?4
-          AND evidence_id = ?5
+            retry_count = $1,
+            next_retry_at = $2,
+            translation_error = $3,
+            updated_at = utc_text()
+        WHERE id = $4
+          AND evidence_id = $5
           AND translation_status = 'processing'
-          AND last_attempt_at = ?6
+          AND last_attempt_at = $6
           AND EXISTS (
               SELECT 1
               FROM evidence_files
-              WHERE id = ?5
-                AND parsed_at = ?7
+              WHERE id = $7
+                AND parsed_at = $8
                 AND status != 'deleted'
                 AND parse_status = 'done'
           )
@@ -556,6 +557,7 @@ async fn mark_chunk_failed(
     .bind(&chunk.row.id)
     .bind(&chunk.row.evidence_id)
     .bind(&chunk.attempt_token)
+    .bind(&session.file_id)
     .bind(&session.parsed_at)
     .execute(pool)
     .await
@@ -573,7 +575,7 @@ async fn mark_chunk_failed(
 }
 
 async fn refresh_file_translation_aggregate_for_session(
-    pool: &SqlitePool,
+    pool: &PgPool,
     session: &TranslationSession,
 ) -> anyhow::Result<()> {
     #[derive(Debug, FromRow)]
@@ -597,14 +599,14 @@ async fn refresh_file_translation_aggregate_for_session(
             (
                 SELECT translation_error
                 FROM evidence_file_chunks
-                WHERE evidence_id = ?1
+                WHERE evidence_id = $1
                   AND translation_status = 'failed'
                   AND translation_error IS NOT NULL
                 ORDER BY updated_at DESC, chunk_index DESC
                 LIMIT 1
             ) AS latest_error
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         "#,
     )
     .bind(&session.file_id)
@@ -636,12 +638,12 @@ async fn refresh_file_translation_aggregate_for_session(
         r#"
         UPDATE evidence_files
         SET
-            translation_status = ?1,
-            translation_error = ?2,
-            source_language = ?3,
-            translated_chunk_count = ?4,
-            failed_chunk_count = ?5
-        WHERE id = ?6 AND parsed_at = ?7
+            translation_status = $1,
+            translation_error = $2,
+            source_language = $3,
+            translated_chunk_count = $4,
+            failed_chunk_count = $5
+        WHERE id = $6 AND parsed_at = $7
         "#,
     )
     .bind(status)
@@ -658,7 +660,7 @@ async fn refresh_file_translation_aggregate_for_session(
     Ok(())
 }
 
-async fn find_stale_processing_file_ids(pool: &SqlitePool) -> anyhow::Result<Vec<String>> {
+async fn find_stale_processing_file_ids(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     #[derive(Debug, FromRow)]
     struct FileIdRow {
         evidence_id: String,
@@ -673,7 +675,7 @@ async fn find_stale_processing_file_ids(pool: &SqlitePool) -> anyhow::Result<Vec
           AND f.parse_status = 'done'
           AND c.translation_status = 'processing'
           AND c.last_attempt_at IS NOT NULL
-          AND datetime(c.last_attempt_at) <= datetime(CURRENT_TIMESTAMP, '-10 minutes')
+          AND c.last_attempt_at <= to_char(now() AT TIME ZONE 'UTC' - interval '10 minutes', 'YYYY-MM-DD HH24:MI:SS')
         "#,
     )
     .fetch_all(pool)
@@ -683,10 +685,7 @@ async fn find_stale_processing_file_ids(pool: &SqlitePool) -> anyhow::Result<Vec
     Ok(rows.into_iter().map(|row| row.evidence_id).collect())
 }
 
-async fn reset_stale_processing_chunks(
-    pool: &SqlitePool,
-    file_ids: &[String],
-) -> anyhow::Result<()> {
+async fn reset_stale_processing_chunks(pool: &PgPool, file_ids: &[String]) -> anyhow::Result<()> {
     for file_id in file_ids {
         sqlx::query(
             r#"
@@ -699,16 +698,16 @@ async fn reset_stale_processing_chunks(
                 END,
                 next_retry_at = CASE
                     WHEN retry_count + 1 > max_retries THEN NULL
-                    WHEN retry_count + 1 = 1 THEN datetime(CURRENT_TIMESTAMP, '+1 minute')
-                    WHEN retry_count + 1 = 2 THEN datetime(CURRENT_TIMESTAMP, '+5 minutes')
-                    ELSE datetime(CURRENT_TIMESTAMP, '+30 minutes')
+                    WHEN retry_count + 1 = 1 THEN to_char(now() AT TIME ZONE 'UTC' + interval '1 minute', 'YYYY-MM-DD HH24:MI:SS')
+                    WHEN retry_count + 1 = 2 THEN to_char(now() AT TIME ZONE 'UTC' + interval '5 minutes', 'YYYY-MM-DD HH24:MI:SS')
+                    ELSE to_char(now() AT TIME ZONE 'UTC' + interval '30 minutes', 'YYYY-MM-DD HH24:MI:SS')
                 END,
                 translation_error = COALESCE(translation_error, 'translation processing timed out; retrying'),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE evidence_id = ?1
+                updated_at = utc_text()
+            WHERE evidence_id = $1
               AND translation_status = 'processing'
               AND last_attempt_at IS NOT NULL
-              AND datetime(last_attempt_at) <= datetime(CURRENT_TIMESTAMP, '-10 minutes')
+              AND last_attempt_at <= to_char(now() AT TIME ZONE 'UTC' - interval '10 minutes', 'YYYY-MM-DD HH24:MI:SS')
             "#,
         )
         .bind(file_id)
@@ -721,7 +720,7 @@ async fn reset_stale_processing_chunks(
 }
 
 async fn reset_stale_processing_chunks_for_session(
-    pool: &SqlitePool,
+    pool: &PgPool,
     session: &TranslationSession,
 ) -> anyhow::Result<()> {
     sqlx::query(
@@ -735,21 +734,21 @@ async fn reset_stale_processing_chunks_for_session(
             END,
             next_retry_at = CASE
                 WHEN retry_count + 1 > max_retries THEN NULL
-                WHEN retry_count + 1 = 1 THEN datetime(CURRENT_TIMESTAMP, '+1 minute')
-                WHEN retry_count + 1 = 2 THEN datetime(CURRENT_TIMESTAMP, '+5 minutes')
-                ELSE datetime(CURRENT_TIMESTAMP, '+30 minutes')
+                WHEN retry_count + 1 = 1 THEN to_char(now() AT TIME ZONE 'UTC' + interval '1 minute', 'YYYY-MM-DD HH24:MI:SS')
+                WHEN retry_count + 1 = 2 THEN to_char(now() AT TIME ZONE 'UTC' + interval '5 minutes', 'YYYY-MM-DD HH24:MI:SS')
+                ELSE to_char(now() AT TIME ZONE 'UTC' + interval '30 minutes', 'YYYY-MM-DD HH24:MI:SS')
             END,
             translation_error = COALESCE(translation_error, 'translation processing timed out; retrying'),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE evidence_id = ?1
+            updated_at = utc_text()
+        WHERE evidence_id = $1
           AND translation_status = 'processing'
           AND last_attempt_at IS NOT NULL
-          AND datetime(last_attempt_at) <= datetime(CURRENT_TIMESTAMP, '-10 minutes')
+          AND last_attempt_at <= to_char(now() AT TIME ZONE 'UTC' - interval '10 minutes', 'YYYY-MM-DD HH24:MI:SS')
           AND EXISTS (
               SELECT 1
               FROM evidence_files
-              WHERE id = ?1
-                AND parsed_at = ?2
+              WHERE id = $1
+                AND parsed_at = $2
                 AND status != 'deleted'
                 AND parse_status = 'done'
           )
@@ -764,7 +763,7 @@ async fn reset_stale_processing_chunks_for_session(
     Ok(())
 }
 
-async fn find_due_file_ids(pool: &SqlitePool) -> anyhow::Result<Vec<String>> {
+async fn find_due_file_ids(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     #[derive(Debug, FromRow)]
     struct FileIdRow {
         evidence_id: String,
@@ -785,7 +784,7 @@ async fn find_due_file_ids(pool: &SqlitePool) -> anyhow::Result<Vec<String>> {
                         OR (
                             c.retry_count <= c.max_retries
                             AND c.next_retry_at IS NOT NULL
-                            AND c.next_retry_at <= CURRENT_TIMESTAMP
+                            AND c.next_retry_at <= utc_text()
                         )
                     )
                 )
@@ -793,7 +792,7 @@ async fn find_due_file_ids(pool: &SqlitePool) -> anyhow::Result<Vec<String>> {
                 c.translation_status = 'failed'
                 AND c.retry_count <= c.max_retries
                 AND c.next_retry_at IS NOT NULL
-                AND c.next_retry_at <= CURRENT_TIMESTAMP
+                AND c.next_retry_at <= utc_text()
              )
           )
         ORDER BY c.evidence_id ASC
@@ -851,7 +850,7 @@ async fn ensure_file_translation_session(
                 translation_provider,
                 translation_model
             FROM evidence_files
-            WHERE id = ?1 AND status != 'deleted' AND parse_status = 'done'
+            WHERE id = $1 AND status != 'deleted' AND parse_status = 'done'
             LIMIT 1
             "#,
         )
@@ -869,12 +868,12 @@ async fn ensure_file_translation_session(
                 r#"
                 UPDATE evidence_files
                 SET
-                    translation_provider = ?1,
-                    translation_model = ?2
-                WHERE id = ?3
+                    translation_provider = $1,
+                    translation_model = $2
+                WHERE id = $3
                   AND status != 'deleted'
                   AND parse_status = 'done'
-                  AND parsed_at = ?4
+                  AND parsed_at = $4
                   AND translation_provider IS NULL
                   AND translation_model IS NULL
                 "#,
@@ -953,15 +952,15 @@ async fn stop_file_translation_for_mismatch(
             next_retry_at = NULL,
             translation_error = CASE
                 WHEN translation_status = 'done' THEN translation_error
-                ELSE ?1
+                ELSE $1
             END,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE evidence_id = ?2
+            updated_at = utc_text()
+        WHERE evidence_id = $2
           AND EXISTS (
               SELECT 1
               FROM evidence_files
-              WHERE id = ?2
-                AND parsed_at = ?3
+              WHERE id = $2
+                AND parsed_at = $3
                 AND status != 'deleted'
                 AND parse_status = 'done'
           )
@@ -991,7 +990,7 @@ async fn stop_file_translation_for_mismatch(
     )
     .await?;
     sqlx::query(
-        "UPDATE evidence_files SET translation_error = ?1 WHERE id = ?2 AND parsed_at = ?3",
+        "UPDATE evidence_files SET translation_error = $1 WHERE id = $2 AND parsed_at = $3",
     )
     .bind(truncate_error(message))
     .bind(file_id)
@@ -1004,7 +1003,7 @@ async fn stop_file_translation_for_mismatch(
 }
 
 async fn aggregate_dominant_source_language(
-    pool: &SqlitePool,
+    pool: &PgPool,
     file_id: &str,
 ) -> anyhow::Result<Option<String>> {
     #[derive(Debug, FromRow)]
@@ -1017,7 +1016,7 @@ async fn aggregate_dominant_source_language(
         r#"
         SELECT source_language, source_text
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         ORDER BY chunk_index ASC
         "#,
     )

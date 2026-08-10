@@ -11,7 +11,7 @@ pub struct HealthResponse {
 }
 
 pub async fn health(State(state): State<AppState>) -> Json<ApiEnvelope<HealthResponse>> {
-    let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1")
+    let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1::bigint")
         .fetch_one(&state.pool)
         .await
         .is_ok();

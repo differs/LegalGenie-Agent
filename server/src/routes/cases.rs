@@ -121,9 +121,9 @@ async fn list_cases(
         SELECT COUNT(1)
         FROM cases c
         WHERE c.status != 'deleted'
-          AND (c.owner_id = ?1 OR EXISTS (
+          AND (c.owner_id = $1 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?1
+                WHERE m.case_id = c.id AND m.user_id = $1
           ))
         "#,
     )
@@ -145,12 +145,12 @@ async fn list_cases(
             (SELECT COUNT(1) FROM event_nodes n WHERE n.case_id = c.id AND n.status != 'deleted') as node_count
         FROM cases c
         WHERE c.status != 'deleted'
-          AND (c.owner_id = ?1 OR EXISTS (
+          AND (c.owner_id = $1 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?1
+                WHERE m.case_id = c.id AND m.user_id = $1
           ))
         ORDER BY c.created_at DESC
-        LIMIT ?2 OFFSET ?3
+        LIMIT $2 OFFSET $3
         "#,
     )
     .bind(user.user_id.to_string())
@@ -213,7 +213,7 @@ async fn create_case(
         .map_err(|e| AppError::bad_request(format!("invalid tags: {e}")))?;
 
     sqlx::query(
-        "INSERT INTO cases (id, name, description, owner_id, status, tags) VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
+        "INSERT INTO cases (id, name, description, owner_id, status, tags) VALUES ($1, $2, $3, $4, 'active', $5)",
     )
     .bind(case_id.to_string())
     .bind(name)
@@ -226,7 +226,7 @@ async fn create_case(
 
     // Ensure owner is also a member.
     sqlx::query(
-        "INSERT OR IGNORE INTO case_members (id, case_id, user_id, role_in_case, joined_by) VALUES (?1, ?2, ?3, 'owner', ?3)",
+        "INSERT INTO case_members (id, case_id, user_id, role_in_case, joined_by) VALUES ($1, $2, $3, 'owner', $3) ON CONFLICT (case_id, user_id) DO NOTHING",
     )
     .bind(Uuid::new_v4().to_string())
     .bind(case_id.to_string())
@@ -273,7 +273,7 @@ async fn get_case(
     Path(id): Path<String>,
 ) -> AppResult<Json<ApiEnvelope<CaseDetail>>> {
     let row: Option<CaseRow> = sqlx::query_as(
-        "SELECT id, name, description, status, tags, owner_id, created_at, updated_at FROM cases WHERE id = ?1 LIMIT 1",
+        "SELECT id, name, description, status, tags, owner_id, created_at, updated_at FROM cases WHERE id = $1 LIMIT 1",
     )
     .bind(&id)
     .fetch_optional(&state.pool)
@@ -311,7 +311,7 @@ async fn update_case(
     Json(req): Json<UpdateCaseRequest>,
 ) -> AppResult<Json<ApiEnvelope<CaseDetail>>> {
     let existing: Option<CaseRow> = sqlx::query_as(
-        "SELECT id, name, description, status, tags, owner_id, created_at, updated_at FROM cases WHERE id = ?1 LIMIT 1",
+        "SELECT id, name, description, status, tags, owner_id, created_at, updated_at FROM cases WHERE id = $1 LIMIT 1",
     )
     .bind(&id)
     .fetch_optional(&state.pool)
@@ -358,7 +358,7 @@ async fn update_case(
     let new_status = req.status.unwrap_or(existing.status);
 
     sqlx::query(
-        "UPDATE cases SET name = ?1, description = ?2, tags = ?3, status = ?4, updated_at = CURRENT_TIMESTAMP WHERE id = ?5",
+        "UPDATE cases SET name = $1, description = $2, tags = $3, status = $4, updated_at = utc_text() WHERE id = $5",
     )
     .bind(&new_name)
     .bind(&new_description)
@@ -418,20 +418,18 @@ async fn delete_case(
         Option<String>,
         String,
     )> = sqlx::query_as(
-        "SELECT id, name, description, status, tags, owner_id FROM cases WHERE id = ?1 LIMIT 1",
+        "SELECT id, name, description, status, tags, owner_id FROM cases WHERE id = $1 LIMIT 1",
     )
     .bind(&id)
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    sqlx::query(
-        "UPDATE cases SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
-    )
-    .bind(&id)
-    .execute(&state.pool)
-    .await
-    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+    sqlx::query("UPDATE cases SET status = 'deleted', updated_at = utc_text() WHERE id = $1")
+        .bind(&id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     if let Some((case_id, name, description, status, tags_raw, owner_id)) = row {
         let tags = tags_raw
@@ -484,7 +482,7 @@ async fn fetch_case_detail(
     case_id: &str,
 ) -> AppResult<CaseDetail> {
     let row: Option<CaseRow> = sqlx::query_as(
-        "SELECT id, name, description, status, tags, owner_id, created_at, updated_at FROM cases WHERE id = ?1 LIMIT 1",
+        "SELECT id, name, description, status, tags, owner_id, created_at, updated_at FROM cases WHERE id = $1 LIMIT 1",
     )
     .bind(case_id)
     .fetch_optional(&state.pool)

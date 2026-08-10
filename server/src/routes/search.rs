@@ -214,17 +214,6 @@ async fn global_search(
     Ok(Json(ApiEnvelope::ok(data)))
 }
 
-async fn search_cases_only(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Query(q): Query<SearchQuery>,
-) -> AppResult<Json<ApiEnvelope<SearchResponseData>>> {
-    let mut params = parse_search_params(&state, &user, q).await?;
-    params.object_types = vec![SearchObjectType::Case];
-    let data = perform_search(&state, &user, params, true).await?;
-    Ok(Json(ApiEnvelope::ok(data)))
-}
-
 async fn search_evidence_only(
     State(state): State<AppState>,
     user: AuthUser,
@@ -272,7 +261,7 @@ async fn history(
     let page_size = q.page_size.clamp(1, 200);
     let offset = (page - 1) * page_size;
 
-    let total: (i64,) = sqlx::query_as("SELECT COUNT(1) FROM search_histories WHERE user_id = ?1")
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(1) FROM search_histories WHERE user_id = $1")
         .bind(user.user_id.to_string())
         .fetch_one(&state.pool)
         .await
@@ -289,9 +278,9 @@ async fn history(
         r#"
             SELECT id, keyword, object_types, case_id, result_count, searched_at
             FROM search_histories
-            WHERE user_id = ?1
+            WHERE user_id = $1
             ORDER BY searched_at DESC
-            LIMIT ?2 OFFSET ?3
+            LIMIT $2 OFFSET $3
             "#,
     )
     .bind(user.user_id.to_string())
@@ -327,7 +316,7 @@ async fn clear_history(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
-    sqlx::query("DELETE FROM search_histories WHERE user_id = ?1")
+    sqlx::query("DELETE FROM search_histories WHERE user_id = $1")
         .bind(user.user_id.to_string())
         .execute(&state.pool)
         .await
@@ -508,6 +497,16 @@ async fn perform_search(
     })
 }
 
+async fn search_cases_only(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<SearchQuery>,
+) -> AppResult<Json<ApiEnvelope<SearchResponseData>>> {
+    let mut params = parse_search_params(&state, &user, q).await?;
+    params.object_types = vec![SearchObjectType::Case];
+    let data = perform_search(&state, &user, params, true).await?;
+    Ok(Json(ApiEnvelope::ok(data)))
+}
 async fn search_cases(
     state: &AppState,
     user: &AuthUser,
@@ -519,25 +518,25 @@ async fn search_cases(
         r#"
         SELECT COUNT(1)
         FROM search_cases
-        JOIN cases c ON search_cases.rowid = c.rowid
-        WHERE search_cases MATCH ?1
+        JOIN cases c ON search_cases.rowid = c.id
+        WHERE search_cases.searchable ILIKE $1
           AND c.status != 'deleted'
-          AND c.id = ?2
-          AND (c.owner_id = ?3 OR EXISTS (
+          AND c.id = $2
+          AND (c.owner_id = $3 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?3
+                WHERE m.case_id = c.id AND m.user_id = $3
           ))
         "#
     } else {
         r#"
         SELECT COUNT(1)
         FROM search_cases
-        JOIN cases c ON search_cases.rowid = c.rowid
-        WHERE search_cases MATCH ?1
+        JOIN cases c ON search_cases.rowid = c.id
+        WHERE search_cases.searchable ILIKE $1
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND (c.owner_id = $2 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $2
           ))
         "#
     };
@@ -565,21 +564,21 @@ async fn search_cases(
             c.id AS object_id,
             c.name AS title,
             c.description AS content,
-            snippet(search_cases, 0, '<em>', '</em>', '...', 10) AS highlight,
+            c.name AS highlight,
             c.tags AS tags,
             c.created_at AS created_at,
-            (-bm25(search_cases)) AS score
+            similarity(search_cases.searchable, replace($1, '%', '')) AS score
         FROM search_cases
-        JOIN cases c ON search_cases.rowid = c.rowid
-        WHERE search_cases MATCH ?1
+        JOIN cases c ON search_cases.rowid = c.id
+        WHERE search_cases.searchable ILIKE $1
           AND c.status != 'deleted'
-          AND c.id = ?2
-          AND (c.owner_id = ?3 OR EXISTS (
+          AND c.id = $2
+          AND (c.owner_id = $3 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?3
+                WHERE m.case_id = c.id AND m.user_id = $3
           ))
         ORDER BY score DESC
-        LIMIT ?4
+        LIMIT $4
         "#
     } else {
         r#"
@@ -587,20 +586,20 @@ async fn search_cases(
             c.id AS object_id,
             c.name AS title,
             c.description AS content,
-            snippet(search_cases, 0, '<em>', '</em>', '...', 10) AS highlight,
+            c.name AS highlight,
             c.tags AS tags,
             c.created_at AS created_at,
-            (-bm25(search_cases)) AS score
+            similarity(search_cases.searchable, replace($1, '%', '')) AS score
         FROM search_cases
-        JOIN cases c ON search_cases.rowid = c.rowid
-        WHERE search_cases MATCH ?1
+        JOIN cases c ON search_cases.rowid = c.id
+        WHERE search_cases.searchable ILIKE $1
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND (c.owner_id = $2 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $2
           ))
         ORDER BY score DESC
-        LIMIT ?3
+        LIMIT $3
         "#
     };
 
@@ -756,7 +755,7 @@ async fn count_evidence_results(
     language_mode: SearchLanguageMode,
 ) -> AppResult<i64> {
     let user_id = user.user_id.to_string();
-    let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT COUNT(1) FROM (");
+    let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT COUNT(1) FROM (");
     let mut has_subquery = false;
 
     push_title_count_subquery(
@@ -771,6 +770,7 @@ async fn count_evidence_results(
         SearchLanguageMode::Source => push_chunk_count_subquery(
             &mut builder,
             &build_fts_column_query("source_text", fts_query),
+            "source_text",
             case_id,
             &user_id,
             &mut has_subquery,
@@ -778,6 +778,7 @@ async fn count_evidence_results(
         SearchLanguageMode::Zh => push_chunk_count_subquery(
             &mut builder,
             &build_fts_column_query("translated_text", fts_query),
+            "translated_text",
             case_id,
             &user_id,
             &mut has_subquery,
@@ -785,6 +786,7 @@ async fn count_evidence_results(
         SearchLanguageMode::Bilingual => push_chunk_count_subquery(
             &mut builder,
             &build_bilingual_fts_query(fts_query),
+            "",
             case_id,
             &user_id,
             &mut has_subquery,
@@ -805,7 +807,7 @@ async fn count_evidence_results(
         .build_query_as()
         .fetch_one(&state.pool)
         .await
-        .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+        .map_err(|e| AppError::internal(format!("db error (evcount): {e}")))?;
 
     Ok(total.0)
 }
@@ -847,35 +849,35 @@ async fn list_title_evidence_matches(
             NULL AS chunk_id,
             NULL AS chunk_index,
             'file name' AS display_label,
-            json_object(
+            jsonb_build_object(
                 'locator_type', 'file_name',
                 'display_label', 'file name'
-            ) AS anchor_json,
-            snippet(search_evidence, 0, '', '', '...', 16) AS snippet_source,
+            )::text AS anchor_json,
+            e.original_name AS snippet_source,
             NULL AS snippet_translated,
             e.created_at AS created_at,
-            (-bm25(search_evidence)) AS score,
+            similarity(search_evidence.searchable, replace($1, '%', '')) ::float8 AS score,
             CASE
                 WHEN e.translation_status != 'done'
                      OR (e.translated_chunk_count + e.failed_chunk_count) < e.chunk_count
                 THEN 1
                 ELSE 0
-            END AS translation_incomplete,
+            END::bigint AS translation_incomplete,
             'source' AS matched_language,
-            0 AS source_fallback
+            0::bigint AS source_fallback
         FROM search_evidence
-        JOIN evidence_files e ON search_evidence.rowid = e.rowid
+        JOIN evidence_files e ON search_evidence.rowid = e.id
         JOIN cases c ON c.id = e.case_id
-        WHERE search_evidence MATCH ?1
+        WHERE search_evidence.original_name ILIKE $1
           AND e.status != 'deleted'
           AND c.status != 'deleted'
-          AND e.case_id = ?2
-          AND (c.owner_id = ?3 OR EXISTS (
+          AND e.case_id = $2
+          AND (c.owner_id = $3 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?3
+                WHERE m.case_id = c.id AND m.user_id = $3
           ))
         ORDER BY score DESC
-        LIMIT ?4
+        LIMIT $4
         "#
     } else {
         r#"
@@ -887,34 +889,34 @@ async fn list_title_evidence_matches(
             NULL AS chunk_id,
             NULL AS chunk_index,
             'file name' AS display_label,
-            json_object(
+            jsonb_build_object(
                 'locator_type', 'file_name',
                 'display_label', 'file name'
-            ) AS anchor_json,
-            snippet(search_evidence, 0, '', '', '...', 16) AS snippet_source,
+            )::text AS anchor_json,
+            e.original_name AS snippet_source,
             NULL AS snippet_translated,
             e.created_at AS created_at,
-            (-bm25(search_evidence)) AS score,
+            similarity(search_evidence.searchable, replace($1, '%', '')) ::float8 AS score,
             CASE
                 WHEN e.translation_status != 'done'
                      OR (e.translated_chunk_count + e.failed_chunk_count) < e.chunk_count
                 THEN 1
                 ELSE 0
-            END AS translation_incomplete,
+            END::bigint AS translation_incomplete,
             'source' AS matched_language,
-            0 AS source_fallback
+            0::bigint AS source_fallback
         FROM search_evidence
-        JOIN evidence_files e ON search_evidence.rowid = e.rowid
+        JOIN evidence_files e ON search_evidence.rowid = e.id
         JOIN cases c ON c.id = e.case_id
-        WHERE search_evidence MATCH ?1
+        WHERE search_evidence.original_name ILIKE $1
           AND e.status != 'deleted'
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND (c.owner_id = $2 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $2
           ))
         ORDER BY score DESC
-        LIMIT ?3
+        LIMIT $3
         "#
     };
 
@@ -950,46 +952,16 @@ async fn list_evidence_chunk_matches(
     matched_language: &str,
 ) -> AppResult<Vec<EvidenceSearchRow>> {
     let scoped_query = build_fts_column_query(column_name, fts_query);
-    let list_sql = if case_id.is_some() {
-        r#"
-        SELECT
-            e.id AS file_id,
-            e.case_id AS case_id,
-            c.name AS case_name,
-            e.original_name AS file_name,
-            ch.id AS chunk_id,
-            ch.chunk_index AS chunk_index,
-            ch.display_label AS display_label,
-            ch.anchor_json AS anchor_json,
-            ch.source_text AS snippet_source,
-            ch.translated_text AS snippet_translated,
-            e.created_at AS created_at,
-            (-bm25(search_evidence_chunks)) AS score,
-            CASE
-                WHEN e.translation_status != 'done'
-                     OR (e.translated_chunk_count + e.failed_chunk_count) < e.chunk_count
-                THEN 1
-                ELSE 0
-            END AS translation_incomplete,
-            ?4 AS matched_language,
-            0 AS source_fallback
-        FROM search_evidence_chunks
-        JOIN evidence_file_chunks ch ON search_evidence_chunks.rowid = ch.rowid
-        JOIN evidence_files e ON e.id = ch.evidence_id
-        JOIN cases c ON c.id = e.case_id
-        WHERE search_evidence_chunks MATCH ?1
-          AND e.status != 'deleted'
-          AND c.status != 'deleted'
-          AND e.case_id = ?2
-          AND (c.owner_id = ?3 OR EXISTS (
-                SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?3
-          ))
-        ORDER BY score DESC
-        LIMIT ?5
-        "#
+    let chunk_col = if column_name.contains("translated") {
+        "searchable_translated"
+    } else if column_name.contains("source") {
+        "searchable_source"
     } else {
-        r#"
+        "searchable"
+    };
+    let list_sql = if case_id.is_some() {
+        format!(
+            r#"
         SELECT
             e.id AS file_id,
             e.case_id AS case_id,
@@ -1002,33 +974,76 @@ async fn list_evidence_chunk_matches(
             ch.source_text AS snippet_source,
             ch.translated_text AS snippet_translated,
             e.created_at AS created_at,
-            (-bm25(search_evidence_chunks)) AS score,
+            similarity(search_evidence_chunks.searchable, replace($1, '%', '')) ::float8 AS score,
             CASE
                 WHEN e.translation_status != 'done'
                      OR (e.translated_chunk_count + e.failed_chunk_count) < e.chunk_count
                 THEN 1
                 ELSE 0
-            END AS translation_incomplete,
-            ?3 AS matched_language,
-            0 AS source_fallback
+            END::bigint AS translation_incomplete,
+            $4 AS matched_language,
+            0::bigint AS source_fallback
         FROM search_evidence_chunks
-        JOIN evidence_file_chunks ch ON search_evidence_chunks.rowid = ch.rowid
+        JOIN evidence_file_chunks ch ON search_evidence_chunks.rowid = ch.id
         JOIN evidence_files e ON e.id = ch.evidence_id
         JOIN cases c ON c.id = e.case_id
-        WHERE search_evidence_chunks MATCH ?1
+        WHERE search_evidence_chunks.{chunk_col} ILIKE $1
           AND e.status != 'deleted'
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND e.case_id = $2
+          AND (c.owner_id = $3 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $3
           ))
         ORDER BY score DESC
-        LIMIT ?4
-        "#
+        LIMIT $5
+        "#,
+            chunk_col = chunk_col
+        )
+    } else {
+        format!(
+            r#"
+        SELECT
+            e.id AS file_id,
+            e.case_id AS case_id,
+            c.name AS case_name,
+            e.original_name AS file_name,
+            ch.id AS chunk_id,
+            ch.chunk_index AS chunk_index,
+            ch.display_label AS display_label,
+            ch.anchor_json AS anchor_json,
+            ch.source_text AS snippet_source,
+            ch.translated_text AS snippet_translated,
+            e.created_at AS created_at,
+            similarity(search_evidence_chunks.searchable, replace($1, '%', '')) ::float8 AS score,
+            CASE
+                WHEN e.translation_status != 'done'
+                     OR (e.translated_chunk_count + e.failed_chunk_count) < e.chunk_count
+                THEN 1
+                ELSE 0
+            END::bigint AS translation_incomplete,
+            $3 AS matched_language,
+            0::bigint AS source_fallback
+        FROM search_evidence_chunks
+        JOIN evidence_file_chunks ch ON search_evidence_chunks.rowid = ch.id
+        JOIN evidence_files e ON e.id = ch.evidence_id
+        JOIN cases c ON c.id = e.case_id
+        WHERE search_evidence_chunks.{chunk_col} ILIKE $1
+          AND e.status != 'deleted'
+          AND c.status != 'deleted'
+          AND (c.owner_id = $2 OR EXISTS (
+                SELECT 1 FROM case_members m
+                WHERE m.case_id = c.id AND m.user_id = $2
+          ))
+        ORDER BY score DESC
+        LIMIT $4
+        "#,
+            chunk_col = chunk_col
+        )
     };
 
     let rows = if let Some(case_id) = case_id {
-        sqlx::query_as::<_, EvidenceSearchRow>(list_sql)
+        sqlx::query_as::<_, EvidenceSearchRow>(&list_sql)
             .bind(scoped_query)
             .bind(case_id)
             .bind(user.user_id.to_string())
@@ -1036,16 +1051,20 @@ async fn list_evidence_chunk_matches(
             .bind(limit)
             .fetch_all(&state.pool)
             .await
-            .map_err(|e| AppError::internal(format!("db error: {e}")))?
+            .map_err(|e| {
+                AppError::internal(format!("db error (chunk-list): {e}\nSQL: {list_sql}"))
+            })?
     } else {
-        sqlx::query_as::<_, EvidenceSearchRow>(list_sql)
+        sqlx::query_as::<_, EvidenceSearchRow>(&list_sql)
             .bind(scoped_query)
             .bind(user.user_id.to_string())
             .bind(matched_language)
             .bind(limit)
             .fetch_all(&state.pool)
             .await
-            .map_err(|e| AppError::internal(format!("db error: {e}")))?
+            .map_err(|e| {
+                AppError::internal(format!("db error (chunk-list): {e}\nSQL: {list_sql}"))
+            })?
     };
 
     Ok(rows)
@@ -1069,34 +1088,34 @@ async fn list_legacy_evidence_matches(
             NULL AS chunk_id,
             NULL AS chunk_index,
             COALESCE(NULLIF(trim(e.original_name), ''), 'full document') AS display_label,
-            json_object(
+            jsonb_build_object(
                 'legacy_fallback', 1,
                 'display_label', COALESCE(NULLIF(trim(e.original_name), ''), 'full document')
-            ) AS anchor_json,
-            snippet(search_evidence, 1, '', '', '...', 16) AS snippet_source,
+            )::text AS anchor_json,
+            e.parsed_text AS snippet_source,
             NULL AS snippet_translated,
             e.created_at AS created_at,
-            (-bm25(search_evidence)) AS score,
-            1 AS translation_incomplete,
+            similarity(search_evidence.searchable, replace($1, '%', '')) ::float8 AS score,
+            1::bigint AS translation_incomplete,
             'source' AS matched_language,
-            1 AS source_fallback
+            1::bigint AS source_fallback
         FROM search_evidence
-        JOIN evidence_files e ON search_evidence.rowid = e.rowid
+        JOIN evidence_files e ON search_evidence.rowid = e.id
         JOIN cases c ON c.id = e.case_id
-        WHERE search_evidence MATCH ?1
+        WHERE search_evidence.parsed_text ILIKE $1
           AND e.status != 'deleted'
           AND c.status != 'deleted'
-          AND e.case_id = ?2
+          AND e.case_id = $2
           AND NOT EXISTS (
                 SELECT 1 FROM evidence_file_chunks ch
                 WHERE ch.evidence_id = e.id
           )
-          AND (c.owner_id = ?3 OR EXISTS (
+          AND (c.owner_id = $3 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?3
+                WHERE m.case_id = c.id AND m.user_id = $3
           ))
         ORDER BY score DESC
-        LIMIT ?4
+        LIMIT $4
         "#
     } else {
         r#"
@@ -1108,33 +1127,33 @@ async fn list_legacy_evidence_matches(
             NULL AS chunk_id,
             NULL AS chunk_index,
             COALESCE(NULLIF(trim(e.original_name), ''), 'full document') AS display_label,
-            json_object(
+            jsonb_build_object(
                 'legacy_fallback', 1,
                 'display_label', COALESCE(NULLIF(trim(e.original_name), ''), 'full document')
-            ) AS anchor_json,
-            snippet(search_evidence, 1, '', '', '...', 16) AS snippet_source,
+            )::text AS anchor_json,
+            e.parsed_text AS snippet_source,
             NULL AS snippet_translated,
             e.created_at AS created_at,
-            (-bm25(search_evidence)) AS score,
-            1 AS translation_incomplete,
+            similarity(search_evidence.searchable, replace($1, '%', '')) ::float8 AS score,
+            1::bigint AS translation_incomplete,
             'source' AS matched_language,
-            1 AS source_fallback
+            1::bigint AS source_fallback
         FROM search_evidence
-        JOIN evidence_files e ON search_evidence.rowid = e.rowid
+        JOIN evidence_files e ON search_evidence.rowid = e.id
         JOIN cases c ON c.id = e.case_id
-        WHERE search_evidence MATCH ?1
+        WHERE search_evidence.parsed_text ILIKE $1
           AND e.status != 'deleted'
           AND c.status != 'deleted'
           AND NOT EXISTS (
                 SELECT 1 FROM evidence_file_chunks ch
                 WHERE ch.evidence_id = e.id
           )
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND (c.owner_id = $2 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $2
           ))
         ORDER BY score DESC
-        LIMIT ?3
+        LIMIT $3
         "#
     };
 
@@ -1160,16 +1179,14 @@ async fn list_legacy_evidence_matches(
     Ok(rows)
 }
 
-fn build_fts_column_query(column_name: &str, fts_query: &str) -> String {
-    format!("{column_name} : ({fts_query})")
+fn build_fts_column_query(_column_name: &str, fts_query: &str) -> String {
+    // Mirror tables index all columns into a unified `searchable` text column,
+    // so column-scoped FTS queries reduce to the plain ILIKE pattern.
+    fts_query.to_string()
 }
 
 fn build_bilingual_fts_query(fts_query: &str) -> String {
-    format!(
-        "({}) OR ({})",
-        build_fts_column_query("source_text", fts_query),
-        build_fts_column_query("translated_text", fts_query)
-    )
+    fts_query.to_string()
 }
 
 fn evidence_result_key(row: &EvidenceSearchRow) -> String {
@@ -1231,8 +1248,9 @@ fn evidence_row_priority(row: &EvidenceSearchRow, language_mode: SearchLanguageM
 }
 
 fn push_chunk_count_subquery(
-    builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>,
+    builder: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     scoped_query: &str,
+    column_name: &str,
     case_id: Option<&str>,
     user_id: &str,
     has_subquery: &mut bool,
@@ -1242,7 +1260,14 @@ fn push_chunk_count_subquery(
     }
     *has_subquery = true;
 
-    builder.push("SELECT printf('chunk:%s', ch.id) AS result_key FROM search_evidence_chunks JOIN evidence_file_chunks ch ON search_evidence_chunks.rowid = ch.rowid JOIN evidence_files e ON e.id = ch.evidence_id JOIN cases c ON c.id = e.case_id WHERE search_evidence_chunks MATCH ");
+    let chunk_col = if column_name.contains("translated") {
+        "searchable_translated"
+    } else if column_name.contains("source") {
+        "searchable_source"
+    } else {
+        "searchable"
+    };
+    builder.push(&format!("SELECT format('chunk:%s', ch.id) AS result_key FROM search_evidence_chunks JOIN evidence_file_chunks ch ON search_evidence_chunks.rowid = ch.id JOIN evidence_files e ON e.id = ch.evidence_id JOIN cases c ON c.id = e.case_id WHERE search_evidence_chunks.{chunk_col} ILIKE "));
     builder.push_bind(scoped_query.to_string());
     builder.push(" AND e.status != 'deleted' AND c.status != 'deleted'");
 
@@ -1268,7 +1293,7 @@ fn push_chunk_count_subquery(
 }
 
 fn push_title_count_subquery(
-    builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>,
+    builder: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     fts_query: &str,
     case_id: Option<&str>,
     user_id: &str,
@@ -1279,8 +1304,8 @@ fn push_title_count_subquery(
     }
     *has_subquery = true;
 
-    builder.push("SELECT printf('file:%s', e.id) AS result_key FROM search_evidence JOIN evidence_files e ON search_evidence.rowid = e.rowid JOIN cases c ON c.id = e.case_id WHERE search_evidence MATCH ");
-    builder.push_bind(build_fts_column_query("original_name", fts_query));
+    builder.push("SELECT format('file:%s', e.id) AS result_key FROM search_evidence JOIN evidence_files e ON search_evidence.rowid = e.id JOIN cases c ON c.id = e.case_id WHERE search_evidence.original_name ILIKE ");
+    builder.push_bind(fts_query.to_string());
     builder.push(" AND e.status != 'deleted' AND c.status != 'deleted'");
 
     if let Some(case_id) = case_id {
@@ -1305,7 +1330,7 @@ fn push_title_count_subquery(
 }
 
 fn push_legacy_count_subquery(
-    builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>,
+    builder: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     fts_query: &str,
     case_id: Option<&str>,
     user_id: &str,
@@ -1316,8 +1341,8 @@ fn push_legacy_count_subquery(
     }
     *has_subquery = true;
 
-    builder.push("SELECT printf('file:%s', e.id) AS result_key FROM search_evidence JOIN evidence_files e ON search_evidence.rowid = e.rowid JOIN cases c ON c.id = e.case_id WHERE search_evidence MATCH ");
-    builder.push_bind(build_fts_column_query("parsed_text", fts_query));
+    builder.push("SELECT format('file:%s', e.id) AS result_key FROM search_evidence JOIN evidence_files e ON search_evidence.rowid = e.id JOIN cases c ON c.id = e.case_id WHERE search_evidence.parsed_text ILIKE ");
+    builder.push_bind(fts_query.to_string());
     builder.push(" AND e.status != 'deleted' AND c.status != 'deleted' AND NOT EXISTS (SELECT 1 FROM evidence_file_chunks ch WHERE ch.evidence_id = e.id)");
 
     if let Some(case_id) = case_id {
@@ -1350,8 +1375,16 @@ fn evidence_search_result_from_row(
         "translated" => row.snippet_translated.as_deref(),
         _ => row.snippet_source.as_deref(),
     };
-    let offsets = matched_text.and_then(|text| find_match_offsets(text, keyword_raw));
-    let highlight = matched_text.map(|text| highlight_match(text, offsets));
+    let keyword_clean = keyword_raw.trim_matches('%').trim().to_string();
+    let offsets = matched_text.and_then(|text| {
+        let kw = keyword_clean.as_str();
+        if kw.is_empty() {
+            None
+        } else {
+            find_text_span(text, kw)
+        }
+    });
+    let highlight = matched_text.map(|text| highlight_match(text, Some(keyword_raw)));
     let content = matched_text.map(str::to_string);
 
     Ok(SearchResult {
@@ -1432,16 +1465,25 @@ fn find_text_span(text: &str, needle: &str) -> Option<(i64, i64)> {
     })
 }
 
-fn highlight_match(text: &str, offsets: Option<(i64, i64)>) -> String {
-    let Some((start, end)) = offsets else {
+fn highlight_match(text: &str, keyword: Option<&str>) -> String {
+    // pg_trgm has no offsets(); wrap the raw keyword (case-insensitively)
+    // wherever it occurs in the source text.
+    let Some(kw) = keyword else {
         return text.to_string();
     };
-
-    let start = start.max(0) as usize;
-    let end = end.max(start as i64) as usize;
-    let byte_start = char_offset_to_byte_index(text, start);
-    let byte_end = char_offset_to_byte_index(text, end);
-
+    if kw.is_empty() {
+        return text.to_string();
+    }
+    let needle = kw.trim_matches('%');
+    if needle.is_empty() {
+        return text.to_string();
+    }
+    let lowered = text.to_lowercase();
+    let lowered_needle = needle.to_lowercase();
+    let Some(byte_start) = lowered.find(&lowered_needle) else {
+        return text.to_string();
+    };
+    let byte_end = byte_start + needle.len();
     let mut out = String::with_capacity(text.len() + 9);
     out.push_str(&text[..byte_start]);
     out.push_str("<em>");
@@ -1473,29 +1515,29 @@ async fn search_nodes(
         r#"
         SELECT COUNT(1)
         FROM search_nodes
-        JOIN event_nodes n ON search_nodes.rowid = n.rowid
+        JOIN event_nodes n ON search_nodes.rowid = n.id
         JOIN cases c ON c.id = n.case_id
-        WHERE search_nodes MATCH ?1
+        WHERE search_nodes.searchable ILIKE $1
           AND n.status != 'deleted'
           AND c.status != 'deleted'
-          AND n.case_id = ?2
-          AND (c.owner_id = ?3 OR EXISTS (
+          AND n.case_id = $2
+          AND (c.owner_id = $3 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?3
+                WHERE m.case_id = c.id AND m.user_id = $3
           ))
         "#
     } else {
         r#"
         SELECT COUNT(1)
         FROM search_nodes
-        JOIN event_nodes n ON search_nodes.rowid = n.rowid
+        JOIN event_nodes n ON search_nodes.rowid = n.id
         JOIN cases c ON c.id = n.case_id
-        WHERE search_nodes MATCH ?1
+        WHERE search_nodes.searchable ILIKE $1
           AND n.status != 'deleted'
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND (c.owner_id = $2 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $2
           ))
         "#
     };
@@ -1525,23 +1567,23 @@ async fn search_nodes(
             c.name AS case_name,
             n.title AS title,
             n.description AS content,
-            snippet(search_nodes, 0, '<em>', '</em>', '...', 10) AS highlight,
+            n.title AS highlight,
             n.tags AS tags,
             n.created_at AS created_at,
-            (-bm25(search_nodes)) AS score
+            similarity(search_nodes.searchable, replace($1, '%', '')) ::float8 AS score
         FROM search_nodes
-        JOIN event_nodes n ON search_nodes.rowid = n.rowid
+        JOIN event_nodes n ON search_nodes.rowid = n.id
         JOIN cases c ON c.id = n.case_id
-        WHERE search_nodes MATCH ?1
+        WHERE search_nodes.searchable ILIKE $1
           AND n.status != 'deleted'
           AND c.status != 'deleted'
-          AND n.case_id = ?2
-          AND (c.owner_id = ?3 OR EXISTS (
+          AND n.case_id = $2
+          AND (c.owner_id = $3 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?3
+                WHERE m.case_id = c.id AND m.user_id = $3
           ))
         ORDER BY score DESC
-        LIMIT ?4
+        LIMIT $4
         "#
     } else {
         r#"
@@ -1551,22 +1593,22 @@ async fn search_nodes(
             c.name AS case_name,
             n.title AS title,
             n.description AS content,
-            snippet(search_nodes, 0, '<em>', '</em>', '...', 10) AS highlight,
+            n.title AS highlight,
             n.tags AS tags,
             n.created_at AS created_at,
-            (-bm25(search_nodes)) AS score
+            similarity(search_nodes.searchable, replace($1, '%', '')) ::float8 AS score
         FROM search_nodes
-        JOIN event_nodes n ON search_nodes.rowid = n.rowid
+        JOIN event_nodes n ON search_nodes.rowid = n.id
         JOIN cases c ON c.id = n.case_id
-        WHERE search_nodes MATCH ?1
+        WHERE search_nodes.searchable ILIKE $1
           AND n.status != 'deleted'
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND (c.owner_id = $2 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $2
           ))
         ORDER BY score DESC
-        LIMIT ?3
+        LIMIT $3
         "#
     };
 
@@ -1658,8 +1700,8 @@ async fn search_persons(
         r#"
         SELECT COUNT(1)
         FROM search_persons
-        JOIN persons p ON search_persons.rowid = p.rowid
-        WHERE search_persons MATCH ?1
+        JOIN persons p ON search_persons.rowid = p.id
+        WHERE search_persons.searchable ILIKE $1
           AND p.status != 'deleted'
           AND EXISTS (
                 SELECT 1
@@ -1667,10 +1709,10 @@ async fn search_persons(
                 JOIN cases c ON c.id = l.case_id
                 WHERE l.person_id = p.id
                   AND c.status != 'deleted'
-                  AND l.case_id = ?2
-                  AND (c.owner_id = ?3 OR EXISTS (
+                  AND l.case_id = $2
+                  AND (c.owner_id = $3 OR EXISTS (
                         SELECT 1 FROM case_members m
-                        WHERE m.case_id = c.id AND m.user_id = ?3
+                        WHERE m.case_id = c.id AND m.user_id = $3
                   ))
           )
         "#
@@ -1678,8 +1720,8 @@ async fn search_persons(
         r#"
         SELECT COUNT(1)
         FROM search_persons
-        JOIN persons p ON search_persons.rowid = p.rowid
-        WHERE search_persons MATCH ?1
+        JOIN persons p ON search_persons.rowid = p.id
+        WHERE search_persons.searchable ILIKE $1
           AND p.status != 'deleted'
           AND EXISTS (
                 SELECT 1
@@ -1687,9 +1729,9 @@ async fn search_persons(
                 JOIN cases c ON c.id = l.case_id
                 WHERE l.person_id = p.id
                   AND c.status != 'deleted'
-                  AND (c.owner_id = ?2 OR EXISTS (
+                  AND (c.owner_id = $2 OR EXISTS (
                         SELECT 1 FROM case_members m
-                        WHERE m.case_id = c.id AND m.user_id = ?2
+                        WHERE m.case_id = c.id AND m.user_id = $2
                   ))
           )
         "#
@@ -1716,8 +1758,8 @@ async fn search_persons(
         r#"
         SELECT
             p.id AS object_id,
-            ?2 AS case_id,
-            (SELECT name FROM cases WHERE id = ?2) AS case_name,
+            $2 AS case_id,
+            (SELECT name FROM cases WHERE id = $2) AS case_name,
             p.name AS title,
             NULLIF(trim(
                 COALESCE(p.organization, '') || ' ' ||
@@ -1725,12 +1767,12 @@ async fn search_persons(
                 COALESCE(p.phone, '') || ' ' ||
                 COALESCE(p.email, '')
             ), '') AS content,
-            snippet(search_persons, 0, '<em>', '</em>', '...', 10) AS highlight,
+            p.name AS highlight,
             p.created_at AS created_at,
-            (-bm25(search_persons)) AS score
+            similarity(search_persons.searchable, replace($1, '%', '')) ::float8 AS score
         FROM search_persons
-        JOIN persons p ON search_persons.rowid = p.rowid
-        WHERE search_persons MATCH ?1
+        JOIN persons p ON search_persons.rowid = p.id
+        WHERE search_persons.searchable ILIKE $1
           AND p.status != 'deleted'
           AND EXISTS (
                 SELECT 1
@@ -1738,14 +1780,14 @@ async fn search_persons(
                 JOIN cases c ON c.id = l.case_id
                 WHERE l.person_id = p.id
                   AND c.status != 'deleted'
-                  AND l.case_id = ?2
-                  AND (c.owner_id = ?3 OR EXISTS (
+                  AND l.case_id = $2
+                  AND (c.owner_id = $3 OR EXISTS (
                         SELECT 1 FROM case_members m
-                        WHERE m.case_id = c.id AND m.user_id = ?3
+                        WHERE m.case_id = c.id AND m.user_id = $3
                   ))
           )
         ORDER BY score DESC
-        LIMIT ?4
+        LIMIT $4
         "#
     } else {
         r#"
@@ -1757,9 +1799,9 @@ async fn search_persons(
                 JOIN cases c2 ON c2.id = l.case_id
                 WHERE l.person_id = p.id
                   AND c2.status != 'deleted'
-                  AND (c2.owner_id = ?2 OR EXISTS (
+                  AND (c2.owner_id = $2 OR EXISTS (
                         SELECT 1 FROM case_members m
-                        WHERE m.case_id = c2.id AND m.user_id = ?2
+                        WHERE m.case_id = c2.id AND m.user_id = $2
                   ))
                 ORDER BY l.created_at DESC
                 LIMIT 1
@@ -1770,9 +1812,9 @@ async fn search_persons(
                 JOIN cases c2 ON c2.id = l.case_id
                 WHERE l.person_id = p.id
                   AND c2.status != 'deleted'
-                  AND (c2.owner_id = ?2 OR EXISTS (
+                  AND (c2.owner_id = $2 OR EXISTS (
                         SELECT 1 FROM case_members m
-                        WHERE m.case_id = c2.id AND m.user_id = ?2
+                        WHERE m.case_id = c2.id AND m.user_id = $2
                   ))
                 ORDER BY l.created_at DESC
                 LIMIT 1
@@ -1784,12 +1826,12 @@ async fn search_persons(
                 COALESCE(p.phone, '') || ' ' ||
                 COALESCE(p.email, '')
             ), '') AS content,
-            snippet(search_persons, 0, '<em>', '</em>', '...', 10) AS highlight,
+            p.name AS highlight,
             p.created_at AS created_at,
-            (-bm25(search_persons)) AS score
+            similarity(search_persons.searchable, replace($1, '%', '')) ::float8 AS score
         FROM search_persons
-        JOIN persons p ON search_persons.rowid = p.rowid
-        WHERE search_persons MATCH ?1
+        JOIN persons p ON search_persons.rowid = p.id
+        WHERE search_persons.searchable ILIKE $1
           AND p.status != 'deleted'
           AND EXISTS (
                 SELECT 1
@@ -1797,13 +1839,13 @@ async fn search_persons(
                 JOIN cases c ON c.id = l.case_id
                 WHERE l.person_id = p.id
                   AND c.status != 'deleted'
-                  AND (c.owner_id = ?2 OR EXISTS (
+                  AND (c.owner_id = $2 OR EXISTS (
                         SELECT 1 FROM case_members m
-                        WHERE m.case_id = c.id AND m.user_id = ?2
+                        WHERE m.case_id = c.id AND m.user_id = $2
                   ))
           )
         ORDER BY score DESC
-        LIMIT ?3
+        LIMIT $3
         "#
     };
 
@@ -1873,29 +1915,13 @@ async fn search_persons(
 }
 
 fn build_fts_query(keyword: &str) -> AppResult<String> {
-    // Conservative query building: split on whitespace and prefix-match each term.
-    // Double quotes are stripped to avoid invalid query syntax.
-    let parts = keyword
-        .split_whitespace()
-        .map(|p| p.replace('"', ""))
-        .filter(|p| !p.is_empty())
-        .take(10)
-        .collect::<Vec<_>>();
-
-    if parts.is_empty() {
+    // pg_trgm ILIKE pattern: keep the raw keyword (quotes stripped), the
+    // database matches case-insensitively with trigram indexing.
+    let kw = keyword.replace('"', "").trim().to_string();
+    if kw.is_empty() {
         return Err(AppError::bad_request("keyword required"));
     }
-
-    let mut out = String::new();
-    for (i, p) in parts.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push('"');
-        out.push_str(p);
-        out.push_str("\"*");
-    }
-    Ok(out)
+    Ok(format!("%{kw}%"))
 }
 
 async fn record_search_history(
@@ -1919,7 +1945,7 @@ async fn record_search_history(
     };
 
     sqlx::query(
-        "INSERT INTO search_histories (id, user_id, keyword, object_types, case_id, result_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO search_histories (id, user_id, keyword, object_types, case_id, result_count) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(Uuid::new_v4().to_string())
     .bind(user.user_id.to_string())
@@ -1938,12 +1964,12 @@ async fn bump_hot_search(state: &AppState, user_id: Uuid, keyword: &str) -> AppR
     sqlx::query(
         r#"
         INSERT INTO user_hot_searches (user_id, keyword, search_count, last_searched, updated_at)
-        VALUES (?1, ?2, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES ($1, $2, 1, utc_text(), utc_text())
         ON CONFLICT(user_id, keyword)
         DO UPDATE SET
-          search_count = search_count + 1,
-          last_searched = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
+          search_count = user_hot_searches.search_count + 1,
+          last_searched = utc_text(),
+          updated_at = utc_text()
         "#,
     )
     .bind(user_id.to_string())
@@ -1957,7 +1983,7 @@ async fn bump_hot_search(state: &AppState, user_id: Uuid, keyword: &str) -> AppR
 async fn get_suggestions(state: &AppState, user_id: Uuid, prefix: &str) -> AppResult<Vec<String>> {
     let like = format!("{}%", prefix);
     let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT keyword FROM user_hot_searches WHERE user_id = ?1 AND keyword LIKE ?2 ORDER BY search_count DESC LIMIT 10",
+        "SELECT keyword FROM user_hot_searches WHERE user_id = $1 AND keyword LIKE $2 ORDER BY search_count DESC LIMIT 10",
     )
     .bind(user_id.to_string())
     .bind(like)

@@ -38,11 +38,6 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("connect database")?;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .context("run migrations")?;
-
     let state = AppState::try_new_with_translation(config, pool, translation)
         .context("build app state with translation provider")?;
     translation::start_retry_poller_once(state.clone());

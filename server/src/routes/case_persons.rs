@@ -135,7 +135,7 @@ async fn list_case_persons(
         SELECT COUNT(1)
         FROM person_case_links l
         JOIN persons p ON p.id = l.person_id
-        WHERE l.case_id = ?1 AND p.status != 'deleted'
+        WHERE l.case_id = $1 AND p.status != 'deleted'
         "#,
     )
     .bind(&case_id)
@@ -160,9 +160,9 @@ async fn list_case_persons(
           p.updated_at
         FROM person_case_links l
         JOIN persons p ON p.id = l.person_id
-        WHERE l.case_id = ?1 AND p.status != 'deleted'
+        WHERE l.case_id = $1 AND p.status != 'deleted'
         ORDER BY p.created_at DESC
-        LIMIT ?2 OFFSET ?3
+        LIMIT $2 OFFSET $3
         "#,
     )
     .bind(&case_id)
@@ -242,7 +242,7 @@ async fn create_case_person(
     sqlx::query(
         r#"
         INSERT INTO persons (id, name, gender, phone, email, organization, position, status, created_by)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8)
         "#,
     )
     .bind(&person_id)
@@ -266,7 +266,7 @@ async fn create_case_person(
     sqlx::query(
         r#"
         INSERT INTO person_case_links (id, person_id, case_id, role_type, role_detail, involved_date)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        VALUES ($1, $2, $3, $4, $5, $6)
         "#,
     )
     .bind(&link_id)
@@ -280,7 +280,7 @@ async fn create_case_person(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let row: Option<(String, String)> =
-        sqlx::query_as("SELECT created_at, updated_at FROM persons WHERE id = ?1 LIMIT 1")
+        sqlx::query_as("SELECT created_at, updated_at FROM persons WHERE id = $1 LIMIT 1")
             .bind(&person_id)
             .fetch_optional(&state.pool)
             .await
@@ -366,7 +366,7 @@ async fn graph(
         SELECT p.id, p.name, l.role_type
         FROM person_case_links l
         JOIN persons p ON p.id = l.person_id
-        WHERE l.case_id = ?1 AND p.status != 'deleted'
+        WHERE l.case_id = $1 AND p.status != 'deleted'
         ORDER BY p.created_at DESC
         "#,
     )
@@ -388,7 +388,7 @@ async fn graph(
         r#"
         SELECT id, from_person_id, to_person_id, rel_type, rel_detail
         FROM person_relationships
-        WHERE case_id = ?1 AND status != 'deleted'
+        WHERE case_id = $1 AND status != 'deleted'
         ORDER BY created_at DESC
         "#,
     )
@@ -465,10 +465,10 @@ async fn dedupe_candidates(
           p.email,
           p.organization,
           p.position,
-          GROUP_CONCAT(DISTINCT l.role_type) AS roles_csv
+          string_agg(DISTINCT l.role_type, ', ') AS roles_csv
         FROM person_case_links l
         JOIN persons p ON p.id = l.person_id
-        WHERE l.case_id = ?1 AND p.status != 'deleted'
+        WHERE l.case_id = $1 AND p.status != 'deleted'
         GROUP BY p.id
         ORDER BY p.created_at DESC
         LIMIT 800
@@ -596,7 +596,7 @@ async fn merge_case_persons(
         SELECT p.name
         FROM persons p
         JOIN person_case_links l ON l.person_id = p.id
-        WHERE l.case_id = ?1 AND p.id = ?2 AND p.status != 'deleted'
+        WHERE l.case_id = $1 AND p.id = $2 AND p.status != 'deleted'
         LIMIT 1
         "#,
     )
@@ -617,7 +617,7 @@ async fn merge_case_persons(
         SELECT p.name
         FROM persons p
         JOIN person_case_links l ON l.person_id = p.id
-        WHERE l.case_id = ?1 AND p.id = ?2 AND p.status != 'deleted'
+        WHERE l.case_id = $1 AND p.id = $2 AND p.status != 'deleted'
         LIMIT 1
         "#,
     )
@@ -643,7 +643,7 @@ async fn merge_case_persons(
         r#"
         SELECT role_type, role_detail, involved_date
         FROM person_case_links
-        WHERE case_id = ?1 AND person_id = ?2
+        WHERE case_id = $1 AND person_id = $2
         "#,
     )
     .bind(&case_id)
@@ -658,8 +658,9 @@ async fn merge_case_persons(
         let link_id = Uuid::new_v4().to_string();
         let inserted = sqlx::query(
             r#"
-            INSERT OR IGNORE INTO person_case_links (id, person_id, case_id, role_type, role_detail, involved_date)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO person_case_links (id, person_id, case_id, role_type, role_detail, involved_date)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (person_id, case_id, role_type) DO NOTHING
             "#,
         )
         .bind(&link_id)
@@ -681,14 +682,14 @@ async fn merge_case_persons(
                 UPDATE person_case_links
                 SET
                   role_detail = CASE
-                    WHEN role_detail IS NULL OR TRIM(role_detail) = '' THEN ?1
+                    WHEN role_detail IS NULL OR TRIM(role_detail) = '' THEN $1
                     ELSE role_detail
                   END,
                   involved_date = CASE
-                    WHEN involved_date IS NULL OR TRIM(involved_date) = '' THEN ?2
+                    WHEN involved_date IS NULL OR TRIM(involved_date) = '' THEN $2
                     ELSE involved_date
                   END
-                WHERE person_id = ?3 AND case_id = ?4 AND role_type = ?5
+                WHERE person_id = $3 AND case_id = $4 AND role_type = $5
                 "#,
             )
             .bind(
@@ -716,9 +717,17 @@ async fn merge_case_persons(
     // Re-point case-local relationships. Use OR IGNORE to avoid violating the UNIQUE constraint.
     let moved_from = sqlx::query(
         r#"
-        UPDATE OR IGNORE person_relationships
-        SET from_person_id = ?1, updated_at = CURRENT_TIMESTAMP
-        WHERE case_id = ?2 AND status != 'deleted' AND from_person_id = ?3
+        UPDATE person_relationships
+        SET from_person_id = $1, updated_at = utc_text()
+        WHERE case_id = $2 AND status != 'deleted' AND from_person_id = $3
+          AND NOT EXISTS (
+                SELECT 1 FROM person_relationships r2
+                WHERE r2.case_id = $2 AND r2.status != 'deleted'
+                  AND r2.from_person_id = $1
+                  AND r2.to_person_id = person_relationships.to_person_id
+                  AND r2.rel_type = person_relationships.rel_type
+                  AND r2.id != person_relationships.id
+          )
         "#,
     )
     .bind(&target_person_id)
@@ -729,9 +738,17 @@ async fn merge_case_persons(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
     let moved_to = sqlx::query(
         r#"
-        UPDATE OR IGNORE person_relationships
-        SET to_person_id = ?1, updated_at = CURRENT_TIMESTAMP
-        WHERE case_id = ?2 AND status != 'deleted' AND to_person_id = ?3
+        UPDATE person_relationships
+        SET to_person_id = $1, updated_at = utc_text()
+        WHERE case_id = $2 AND status != 'deleted' AND to_person_id = $3
+          AND NOT EXISTS (
+                SELECT 1 FROM person_relationships r2
+                WHERE r2.case_id = $2 AND r2.status != 'deleted'
+                  AND r2.from_person_id = person_relationships.from_person_id
+                  AND r2.to_person_id = $1
+                  AND r2.rel_type = person_relationships.rel_type
+                  AND r2.id != person_relationships.id
+          )
         "#,
     )
     .bind(&target_person_id)
@@ -746,10 +763,10 @@ async fn merge_case_persons(
     let dropped = sqlx::query(
         r#"
         UPDATE person_relationships
-        SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
-        WHERE case_id = ?1
+        SET status = 'deleted', updated_at = utc_text()
+        WHERE case_id = $1
           AND status != 'deleted'
-          AND (from_person_id = ?2 OR to_person_id = ?2)
+          AND (from_person_id = $2 OR to_person_id = $2)
         "#,
     )
     .bind(&case_id)
@@ -760,7 +777,7 @@ async fn merge_case_persons(
     let dropped_relationships = dropped.rows_affected() as i64;
 
     // Finally remove the source person's links in THIS case.
-    sqlx::query("DELETE FROM person_case_links WHERE case_id = ?1 AND person_id = ?2")
+    sqlx::query("DELETE FROM person_case_links WHERE case_id = $1 AND person_id = $2")
         .bind(&case_id)
         .bind(&source_person_id)
         .execute(&mut *tx)
@@ -865,7 +882,7 @@ async fn list_relationships(
         FROM person_relationships r
         JOIN persons p1 ON p1.id = r.from_person_id
         JOIN persons p2 ON p2.id = r.to_person_id
-        WHERE r.case_id = ?1
+        WHERE r.case_id = $1
           AND r.status != 'deleted'
           AND p1.status != 'deleted'
           AND p2.status != 'deleted'
@@ -912,7 +929,7 @@ async fn create_relationship(
         SELECT p.name
         FROM persons p
         JOIN person_case_links l ON l.person_id = p.id
-        WHERE l.case_id = ?1 AND p.id = ?2 AND p.status != 'deleted'
+        WHERE l.case_id = $1 AND p.id = $2 AND p.status != 'deleted'
         LIMIT 1
         "#,
     )
@@ -933,7 +950,7 @@ async fn create_relationship(
         SELECT p.name
         FROM persons p
         JOIN person_case_links l ON l.person_id = p.id
-        WHERE l.case_id = ?1 AND p.id = ?2 AND p.status != 'deleted'
+        WHERE l.case_id = $1 AND p.id = $2 AND p.status != 'deleted'
         LIMIT 1
         "#,
     )
@@ -952,9 +969,10 @@ async fn create_relationship(
     let rel_id = Uuid::new_v4().to_string();
     let inserted = sqlx::query(
         r#"
-        INSERT OR IGNORE INTO person_relationships (
+        INSERT INTO person_relationships (
           id, case_id, from_person_id, to_person_id, rel_type, rel_detail, status, created_by
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7)
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
+        ON CONFLICT (case_id, from_person_id, to_person_id, rel_type) DO NOTHING
         "#,
     )
     .bind(&rel_id)
@@ -978,7 +996,7 @@ async fn create_relationship(
     }
 
     let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT created_at, updated_at FROM person_relationships WHERE id = ?1 LIMIT 1",
+        "SELECT created_at, updated_at FROM person_relationships WHERE id = $1 LIMIT 1",
     )
     .bind(&rel_id)
     .fetch_optional(&state.pool)
@@ -1043,7 +1061,7 @@ async fn delete_relationship(
         r#"
         SELECT from_person_id, to_person_id, rel_type, status, rel_detail
         FROM person_relationships
-        WHERE id = ?1 AND case_id = ?2
+        WHERE id = $1 AND case_id = $2
         LIMIT 1
         "#,
     )
@@ -1061,7 +1079,7 @@ async fn delete_relationship(
     }
 
     sqlx::query(
-        "UPDATE person_relationships SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND case_id = ?2",
+        "UPDATE person_relationships SET status = 'deleted', updated_at = utc_text() WHERE id = $1 AND case_id = $2",
     )
     .bind(&rel_id)
     .bind(&case_id)

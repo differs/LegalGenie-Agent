@@ -1,10 +1,29 @@
 services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: "${PG_USER:-legalgenie}"
+      POSTGRES_PASSWORD: "${PG_PASSWORD:-legalgenie_dev}"
+      POSTGRES_DB: "${PG_DB:-legalgenie}"
+    ports:
+      - "5432:5432"
+    volumes:
+      - legalgenie-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-legalgenie} -d ${PG_DB:-legalgenie}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   server:
     build:
       context: .
       dockerfile: docker/Dockerfile.server
     ports:
       - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       APP_ENV: "${APP_ENV:-development}"
       FORCE_HTTPS: "${FORCE_HTTPS:-false}"
@@ -20,16 +39,16 @@ services:
       ASR_LANGUAGE: "${ASR_LANGUAGE:-zh}"
       ASR_THREADS: "${ASR_THREADS:-4}"
 
-      # Ensure the server is reachable from outside the container.
       SERVER_HOST: "0.0.0.0"
       SERVER_PORT: "8000"
 
-      # Keep default paths consistent with repo layout mounted below.
-      DATABASE_URL: "sqlite://data/legal_minds.db"
+      DATABASE_URL: "postgres://${PG_USER:-legalgenie}:${PG_PASSWORD:-legalgenie_dev}@postgres:5432/${PG_DB:-legalgenie}"
       STORAGE_PATH: "./storage"
       TEMP_PATH: "./storage/temp"
       TESSDATA_DIR: "./data/tessdata"
       WHISPER_MODEL_PATH: "./data/models/whisper/ggml-tiny.bin"
     volumes:
-      - ./data:/app/data
       - ./storage:/app/storage
+
+volumes:
+  legalgenie-pg-data:

@@ -244,7 +244,7 @@ async fn create_node(
     let event_date = parse_date(&req.event_time)?;
 
     let next_sort: (i64,) = sqlx::query_as(
-        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM event_nodes WHERE case_id = ?1 AND event_time = ?2 AND status != 'deleted'",
+        "SELECT COALESCE(MAX(sort_order), 0)::bigint + 1 FROM event_nodes WHERE case_id = $1 AND event_time = $2 AND status != 'deleted'",
     )
     .bind(&case_id)
     .bind(event_date.to_string())
@@ -267,7 +267,7 @@ async fn create_node(
         r#"
         INSERT INTO event_nodes (
             id, case_id, title, description, event_time, sort_order, tags, status, created_by
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8)
         "#,
     )
     .bind(node_id.to_string())
@@ -283,7 +283,7 @@ async fn create_node(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let row: Option<NodeRow> = sqlx::query_as(
-        "SELECT id, case_id, title, description, event_time, sort_order, tags, created_at, updated_at FROM event_nodes WHERE id = ?1 LIMIT 1",
+        "SELECT id, case_id, title, description, event_time, sort_order, tags, created_at, updated_at FROM event_nodes WHERE id = $1 LIMIT 1",
     )
     .bind(node_id.to_string())
     .fetch_optional(&state.pool)

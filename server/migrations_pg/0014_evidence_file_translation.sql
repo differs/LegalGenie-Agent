@@ -3,39 +3,38 @@ ALTER TABLE evidence_files ADD COLUMN translation_status TEXT NOT NULL DEFAULT '
 ALTER TABLE evidence_files ADD COLUMN translation_error TEXT;
 ALTER TABLE evidence_files ADD COLUMN source_language TEXT;
 ALTER TABLE evidence_files ADD COLUMN target_language TEXT;
-ALTER TABLE evidence_files ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE evidence_files ADD COLUMN translated_chunk_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE evidence_files ADD COLUMN failed_chunk_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE evidence_files ADD COLUMN chunk_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE evidence_files ADD COLUMN translated_chunk_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE evidence_files ADD COLUMN failed_chunk_count BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE evidence_files ADD COLUMN translation_model TEXT;
 ALTER TABLE evidence_files ADD COLUMN translation_provider TEXT;
 
--- Chunk-level translation source of truth.
 CREATE TABLE IF NOT EXISTS evidence_file_chunks (
     id                  TEXT PRIMARY KEY,
     evidence_id         TEXT NOT NULL REFERENCES evidence_files(id) ON DELETE CASCADE,
     case_id             TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-    chunk_index         INTEGER NOT NULL,
-    page_number         INTEGER NOT NULL DEFAULT 0,
-    segment_number      INTEGER NOT NULL DEFAULT 0,
+    chunk_index         BIGINT NOT NULL,
+    page_number         BIGINT NOT NULL DEFAULT 0,
+    segment_number      BIGINT NOT NULL DEFAULT 0,
     chunk_kind          TEXT NOT NULL DEFAULT 'text',
     display_label       TEXT NOT NULL,
     source_text         TEXT NOT NULL,
-    char_count          INTEGER NOT NULL DEFAULT 0,
-    token_estimate      INTEGER NOT NULL DEFAULT 0,
+    char_count          BIGINT NOT NULL DEFAULT 0,
+    token_estimate      BIGINT NOT NULL DEFAULT 0,
     anchor_json         TEXT,
     source_text_hash    TEXT NOT NULL,
     source_language     TEXT,
     target_language     TEXT,
     translated_text     TEXT,
     translation_status  TEXT NOT NULL DEFAULT 'pending',
-    retry_count         INTEGER NOT NULL DEFAULT 0,
-    max_retries         INTEGER NOT NULL DEFAULT 3,
-    last_attempt_at     DATETIME,
-    next_retry_at       DATETIME,
+    retry_count         BIGINT NOT NULL DEFAULT 0,
+    max_retries         BIGINT NOT NULL DEFAULT 3,
+    last_attempt_at     TEXT,
+    next_retry_at       TEXT,
     translation_error   TEXT,
-    translated_at       DATETIME,
-    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    translated_at       TEXT,
+    created_at          TEXT NOT NULL DEFAULT utc_text(),
+    updated_at          TEXT NOT NULL DEFAULT utc_text()
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_file_chunks_file_chunk

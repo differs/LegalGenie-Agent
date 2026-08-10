@@ -247,7 +247,7 @@ struct UserRow {
 
 async fn fetch_refresh_token_version(state: &AppState, user_id: Uuid) -> AppResult<i64> {
     let row: Option<(i64,)> =
-        sqlx::query_as("SELECT refresh_token_version FROM users WHERE id = ?1 LIMIT 1")
+        sqlx::query_as("SELECT refresh_token_version FROM users WHERE id = $1 LIMIT 1")
             .bind(user_id.to_string())
             .fetch_optional(&state.pool)
             .await
@@ -265,8 +265,8 @@ async fn bump_refresh_token_version(state: &AppState, user_id: Uuid) -> AppResul
         r#"
         UPDATE users
         SET refresh_token_version = refresh_token_version + 1,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?1
+            updated_at = utc_text()
+        WHERE id = $1
         "#,
     )
     .bind(user_id.to_string())
@@ -289,7 +289,7 @@ async fn register(
     }
 
     let exists: (i64,) =
-        sqlx::query_as("SELECT COUNT(1) FROM users WHERE username = ?1 OR email = ?2")
+        sqlx::query_as("SELECT COUNT(1) FROM users WHERE username = $1 OR email = $2")
             .bind(username)
             .bind(email)
             .fetch_one(&state.pool)
@@ -304,7 +304,7 @@ async fn register(
     let password_hash = hash_password(&req.password)?;
 
     sqlx::query(
-        "INSERT INTO users (id, username, email, password_hash, real_name, status) VALUES (?1, ?2, ?3, ?4, ?5, 'active')",
+        "INSERT INTO users (id, username, email, password_hash, real_name, status) VALUES ($1, $2, $3, $4, $5, 'active')",
     )
     .bind(user_id.to_string())
     .bind(username)
@@ -316,7 +316,7 @@ async fn register(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     // Default role: host_lawyer
-    sqlx::query("INSERT INTO user_roles (id, user_id, role_code) VALUES (?1, ?2, ?3)")
+    sqlx::query("INSERT INTO user_roles (id, user_id, role_code) VALUES ($1, $2, $3)")
         .bind(Uuid::new_v4().to_string())
         .bind(user_id.to_string())
         .bind("host_lawyer")
@@ -403,7 +403,7 @@ async fn login(
     }
 
     let user: Option<UserRow> = sqlx::query_as(
-        "SELECT id, username, email, password_hash, real_name, status FROM users WHERE username = ?1 OR email = ?1 LIMIT 1",
+        "SELECT id, username, email, password_hash, real_name, status FROM users WHERE username = $1 OR email = $1 LIMIT 1",
     )
     .bind(ident)
     .fetch_optional(&state.pool)
@@ -424,7 +424,7 @@ async fn login(
     }
 
     let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT role_code FROM user_roles WHERE user_id = ?1 ORDER BY role_code",
+        "SELECT role_code FROM user_roles WHERE user_id = $1 ORDER BY role_code",
     )
     .bind(&user.id)
     .fetch_all(&state.pool)
@@ -517,7 +517,7 @@ async fn refresh(
 
     // Verify user still exists and is active.
     let row: Option<(String, String, i64)> = sqlx::query_as(
-        "SELECT username, status, refresh_token_version FROM users WHERE id = ?1 LIMIT 1",
+        "SELECT username, status, refresh_token_version FROM users WHERE id = $1 LIMIT 1",
     )
     .bind(user_id.to_string())
     .fetch_optional(&state.pool)
@@ -535,7 +535,7 @@ async fn refresh(
     }
 
     let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT role_code FROM user_roles WHERE user_id = ?1 ORDER BY role_code",
+        "SELECT role_code FROM user_roles WHERE user_id = $1 ORDER BY role_code",
     )
     .bind(user_id.to_string())
     .fetch_all(&state.pool)
@@ -590,7 +590,7 @@ async fn me(
     user: AuthUser,
 ) -> AppResult<Json<ApiEnvelope<UserInfo>>> {
     let row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT email, real_name FROM users WHERE id = ?1 LIMIT 1")
+        sqlx::query_as("SELECT email, real_name FROM users WHERE id = $1 LIMIT 1")
             .bind(user.user_id.to_string())
             .fetch_optional(&state.pool)
             .await
@@ -616,7 +616,7 @@ async fn change_password(
     Json(req): Json<ChangePasswordRequest>,
 ) -> AppResult<Json<ApiEnvelope<serde_json::Value>>> {
     let row: Option<(String,)> =
-        sqlx::query_as("SELECT password_hash FROM users WHERE id = ?1 LIMIT 1")
+        sqlx::query_as("SELECT password_hash FROM users WHERE id = $1 LIMIT 1")
             .bind(user.user_id.to_string())
             .fetch_optional(&state.pool)
             .await
@@ -634,10 +634,10 @@ async fn change_password(
     sqlx::query(
         r#"
         UPDATE users
-        SET password_hash = ?1,
+        SET password_hash = $1,
             refresh_token_version = refresh_token_version + 1,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?2
+            updated_at = utc_text()
+        WHERE id = $2
         "#,
     )
     .bind(new_hash)

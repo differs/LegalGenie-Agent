@@ -61,7 +61,7 @@ pub async fn idempotency_middleware(
 
     // Replay a previously cached successful response if present.
     let replay = sqlx::query_as::<_, (i64, String)>(
-        "SELECT status_code, response_body FROM idempotency_records WHERE request_key = ?1",
+        "SELECT status_code, response_body FROM idempotency_records WHERE request_key = $1",
     )
     .bind(&request_key)
     .fetch_optional(&state.pool)
@@ -101,7 +101,7 @@ pub async fn idempotency_middleware(
             let status_code = parts.status.as_u16() as i64;
 
             let result = sqlx::query(
-                "INSERT INTO idempotency_records (request_key, status_code, response_body) VALUES (?1, ?2, ?3)",
+                "INSERT INTO idempotency_records (request_key, status_code, response_body) VALUES ($1, $2, $3)",
             )
             .bind(&request_key)
             .bind(status_code)

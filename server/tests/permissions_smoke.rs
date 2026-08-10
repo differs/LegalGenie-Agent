@@ -1,11 +1,12 @@
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use legalminds_server::{router, AppConfig, AppEnv, AppState, CorsOrigins};
 use serde_json::json;
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use tempfile::TempDir;
 use tower::util::ServiceExt;
+
+use sqlx::PgPool;
+mod test_support;
 
 #[tokio::test]
 async fn viewer_is_read_only_for_case_mutations() {
@@ -501,7 +502,7 @@ async fn updating_member_role_preserves_original_joined_by() {
         owner_id
     );
 
-    sqlx::query("UPDATE cases SET owner_id = ?1 WHERE id = ?2")
+    sqlx::query("UPDATE cases SET owner_id = $1 WHERE id = $2")
         .bind(&next_owner_id)
         .bind(&case_id)
         .execute(&pool)
@@ -546,69 +547,6 @@ async fn register_user(app: &axum::Router, username: &str, email: &str) -> (Stri
         .expect("access_token")
         .to_string();
     (user_id, token)
-}
-
-async fn build_test_app() -> (axum::Router, TempDir) {
-    let (app, tmp, _pool) = build_test_app_with_pool().await;
-    (app, tmp)
-}
-
-async fn build_test_app_with_pool() -> (axum::Router, TempDir, SqlitePool) {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("connect sqlite memory");
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
-        .await
-        .expect("pragma foreign_keys");
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("migrate");
-
-    let tmp = TempDir::new().expect("tempdir");
-    let storage_path = tmp.path().join("storage");
-    let temp_path = storage_path.join("temp");
-    let tessdata_dir = tmp.path().join("tessdata");
-
-    tokio::fs::create_dir_all(&storage_path)
-        .await
-        .expect("create storage");
-    tokio::fs::create_dir_all(&temp_path)
-        .await
-        .expect("create temp");
-    tokio::fs::create_dir_all(&tessdata_dir)
-        .await
-        .expect("create tessdata");
-
-    let cfg = AppConfig {
-        app_env: AppEnv::Test,
-        server_host: "127.0.0.1".to_string(),
-        server_port: 0,
-        database_url: "sqlite::memory:".to_string(),
-        cors_origins: CorsOrigins::Any,
-        force_https: false,
-        trust_proxy_headers: false,
-        jwt_secret: "test-secret-please-change-32-chars-min".to_string(),
-        jwt_secret_old: None,
-        access_token_expire_minutes: 60,
-        refresh_token_expire_days: 7,
-        storage_path: storage_path.to_string_lossy().to_string(),
-        max_file_size: 10 * 1024 * 1024,
-        allowed_file_types: vec!["txt".to_string(), "json".to_string()],
-        temp_path: temp_path.to_string_lossy().to_string(),
-        tessdata_dir: tessdata_dir.to_string_lossy().to_string(),
-        whisper_model_path: tmp.path().join("whisper.bin").to_string_lossy().to_string(),
-        asr_language: "zh".to_string(),
-        asr_threads: 1,
-    };
-
-    let state = AppState::new(cfg, pool);
-    let pool = state.pool.clone();
-    (router(state), tmp, pool)
 }
 
 async fn request_json(
@@ -680,4 +618,13 @@ async fn request_multipart_text(
         .to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     (status, json)
+}
+
+async fn build_test_app() -> (axum::Router, TempDir) {
+    let (app, tmp, _pool) = build_test_app_with_pool().await;
+    (app, tmp)
+}
+
+async fn build_test_app_with_pool() -> (axum::Router, TempDir, PgPool) {
+    test_support::build_test_app_with_pool().await
 }

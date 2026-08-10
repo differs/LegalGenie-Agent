@@ -3,7 +3,7 @@ use crate::state::AppState;
 use anyhow::{anyhow, Context};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use uuid::Uuid;
@@ -93,15 +93,15 @@ pub async fn enqueue_parse(state: AppState, file_id: String, force: bool) -> any
     Ok(true)
 }
 
-async fn mark_processing(pool: &SqlitePool, file_id: &str, force: bool) -> anyhow::Result<bool> {
+async fn mark_processing(pool: &PgPool, file_id: &str, force: bool) -> anyhow::Result<bool> {
     // Without `force` we only start parsing files that are pending or failed,
     // so a duplicate request cannot re-parse an already parsed file.
     // With `force` (explicit user action) any non-processing state may be
     // reset and re-parsed, but an in-flight parse is still never double-run.
     let sql = if force {
-        "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = ?1 AND status != 'deleted' AND parse_status != 'processing'"
+        "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = $1 AND status != 'deleted' AND parse_status != 'processing'"
     } else {
-        "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = ?1 AND status != 'deleted' AND parse_status IN ('pending', 'failed')"
+        "UPDATE evidence_files SET parse_status = 'processing', parse_error = NULL WHERE id = $1 AND status != 'deleted' AND parse_status IN ('pending', 'failed')"
     };
 
     let res = sqlx::query(sql)
@@ -113,11 +113,11 @@ async fn mark_processing(pool: &SqlitePool, file_id: &str, force: bool) -> anyho
     Ok(res.rows_affected() > 0)
 }
 
-async fn mark_failed(pool: &SqlitePool, file_id: &str, err: &str) -> anyhow::Result<()> {
+async fn mark_failed(pool: &PgPool, file_id: &str, err: &str) -> anyhow::Result<()> {
     let err = truncate_string(err, 2000);
     let parsed_at = precise_timestamp();
     sqlx::query(
-        "UPDATE evidence_files SET parse_status = 'failed', parse_error = ?1, parsed_at = ?2 WHERE id = ?3",
+        "UPDATE evidence_files SET parse_status = 'failed', parse_error = $1, parsed_at = $2 WHERE id = $3",
     )
     .bind(err)
     .bind(parsed_at)
@@ -129,7 +129,7 @@ async fn mark_failed(pool: &SqlitePool, file_id: &str, err: &str) -> anyhow::Res
 }
 
 async fn persist_chunks_and_mark_done(
-    pool: &SqlitePool,
+    pool: &PgPool,
     row: &EvidenceFileToParse,
     out: ParseOutput,
     mut chunks: Vec<FileChunk>,
@@ -138,7 +138,7 @@ async fn persist_chunks_and_mark_done(
     let parsed_at = precise_timestamp();
     let mut tx = pool.begin().await.context("begin parse persistence tx")?;
 
-    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
+    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = $1")
         .bind(&row.id)
         .execute(&mut *tx)
         .await
@@ -169,7 +169,7 @@ async fn persist_chunks_and_mark_done(
                 source_text_hash,
                 translation_status
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'pending')
             "#,
         )
         .bind(Uuid::new_v4().to_string())
@@ -193,12 +193,12 @@ async fn persist_chunks_and_mark_done(
     sqlx::query(
         r#"
         UPDATE evidence_files
-        SET parsed_text = ?1,
-            page_count = ?2,
-            duration = ?3,
+        SET parsed_text = $1,
+            page_count = $2,
+            duration = $3,
             parse_status = 'done',
             parse_error = NULL,
-            parsed_at = ?4,
+            parsed_at = $4,
             translation_status = 'pending',
             translation_error = NULL,
             translated_chunk_count = 0,
@@ -206,8 +206,8 @@ async fn persist_chunks_and_mark_done(
             source_language = NULL,
             translation_model = NULL,
             translation_provider = NULL,
-            chunk_count = ?5
-        WHERE id = ?6
+            chunk_count = $5
+        WHERE id = $6
         "#,
     )
     .bind(out.parsed_text)
@@ -238,7 +238,7 @@ async fn parse_and_update(state: &AppState, file_id: &str) -> anyhow::Result<()>
         r#"
         SELECT id, case_id, original_name, file_type, storage_path
         FROM evidence_files
-        WHERE id = ?1 AND status != 'deleted'
+        WHERE id = $1 AND status != 'deleted'
         LIMIT 1
         "#,
     )

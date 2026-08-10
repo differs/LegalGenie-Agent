@@ -95,7 +95,7 @@ async fn list_members(
     let page_size = p.page_size.clamp(1, 200);
     let offset = (page - 1) * page_size;
 
-    let total: (i64,) = sqlx::query_as("SELECT COUNT(1) FROM case_members WHERE case_id = ?1")
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(1) FROM case_members WHERE case_id = $1")
         .bind(&case_id)
         .fetch_one(&state.pool)
         .await
@@ -113,7 +113,7 @@ async fn list_members(
             m.joined_by
         FROM case_members m
         JOIN users u ON u.id = m.user_id
-        WHERE m.case_id = ?1
+        WHERE m.case_id = $1
         ORDER BY
             CASE m.role_in_case
                 WHEN 'owner' THEN 0
@@ -121,7 +121,7 @@ async fn list_members(
                 ELSE 2
             END,
             m.joined_at ASC
-        LIMIT ?2 OFFSET ?3
+        LIMIT $2 OFFSET $3
         "#,
     )
     .bind(&case_id)
@@ -163,7 +163,7 @@ async fn get_my_membership(
     let user_id = user.user_id.to_string();
 
     let role_row: Option<(String,)> = sqlx::query_as(
-        "SELECT role_in_case FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1",
+        "SELECT role_in_case FROM case_members WHERE case_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(&case_id)
     .bind(&user_id)
@@ -176,7 +176,7 @@ async fn get_my_membership(
     } else {
         // Fallback for older data where owner membership row might not exist.
         let owner_row: Option<(String,)> = sqlx::query_as(
-            "SELECT owner_id FROM cases WHERE id = ?1 AND status != 'deleted' LIMIT 1",
+            "SELECT owner_id FROM cases WHERE id = $1 AND status != 'deleted' LIMIT 1",
         )
         .bind(&case_id)
         .fetch_optional(&state.pool)
@@ -210,7 +210,7 @@ async fn add_member(
 
     // Ensure user exists and is active.
     let user_row: Option<(String, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT username, email, real_name, status FROM users WHERE id = ?1 LIMIT 1",
+        "SELECT username, email, real_name, status FROM users WHERE id = $1 LIMIT 1",
     )
     .bind(&member_user_id)
     .fetch_optional(&state.pool)
@@ -227,7 +227,7 @@ async fn add_member(
     // The owner is always a member; do not allow changing their role via this endpoint.
     if member_user_id == user.user_id.to_string() {
         sqlx::query(
-            "INSERT OR IGNORE INTO case_members (id, case_id, user_id, role_in_case, joined_by) VALUES (?1, ?2, ?3, 'owner', ?3)",
+            "INSERT INTO case_members (id, case_id, user_id, role_in_case, joined_by) VALUES ($1, $2, $3, 'owner', $3) ON CONFLICT (case_id, user_id) DO NOTHING",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&case_id)
@@ -237,7 +237,7 @@ async fn add_member(
         .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
         let row: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT role_in_case, joined_at, joined_by FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1",
+            "SELECT role_in_case, joined_at, joined_by FROM case_members WHERE case_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(&case_id)
         .bind(&member_user_id)
@@ -277,7 +277,7 @@ async fn add_member(
     }
 
     let existing_role: Option<(String,)> = sqlx::query_as(
-        "SELECT role_in_case FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1",
+        "SELECT role_in_case FROM case_members WHERE case_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(&case_id)
     .bind(&member_user_id)
@@ -289,7 +289,7 @@ async fn add_member(
     sqlx::query(
         r#"
         INSERT INTO case_members (id, case_id, user_id, role_in_case, joined_by)
-        VALUES (?1, ?2, ?3, ?4, ?5)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT(case_id, user_id)
         DO UPDATE SET
           role_in_case = excluded.role_in_case
@@ -305,7 +305,7 @@ async fn add_member(
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT joined_at, joined_by FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1",
+        "SELECT joined_at, joined_by FROM case_members WHERE case_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(&case_id)
     .bind(&member_user_id)
@@ -387,7 +387,7 @@ async fn remove_member(
         SELECT u.username, m.role_in_case
         FROM case_members m
         JOIN users u ON u.id = m.user_id
-        WHERE m.case_id = ?1 AND m.user_id = ?2
+        WHERE m.case_id = $1 AND m.user_id = $2
         LIMIT 1
         "#,
     )
@@ -397,7 +397,7 @@ async fn remove_member(
     .await
     .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
-    let deleted = sqlx::query("DELETE FROM case_members WHERE case_id = ?1 AND user_id = ?2")
+    let deleted = sqlx::query("DELETE FROM case_members WHERE case_id = $1 AND user_id = $2")
         .bind(&case_id)
         .bind(&member_user_id)
         .execute(&state.pool)

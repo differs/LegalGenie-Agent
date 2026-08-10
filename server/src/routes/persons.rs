@@ -84,11 +84,11 @@ async fn get_person(
         SELECT l.case_id, l.role_type, l.role_detail, l.involved_date, l.created_at
         FROM person_case_links l
         JOIN cases c ON c.id = l.case_id
-        WHERE l.person_id = ?1
+        WHERE l.person_id = $1
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND (c.owner_id = $2 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $2
           ))
         ORDER BY l.created_at DESC
         "#,
@@ -227,15 +227,15 @@ async fn update_person(
     sqlx::query(
         r#"
         UPDATE persons
-        SET name = ?1,
-            gender = ?2,
-            phone = ?3,
-            email = ?4,
-            organization = ?5,
-            position = ?6,
-            notes = ?7,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?8 AND status != 'deleted'
+        SET name = $1,
+            gender = $2,
+            phone = $3,
+            email = $4,
+            organization = $5,
+            position = $6,
+            notes = $7,
+            updated_at = utc_text()
+        WHERE id = $8 AND status != 'deleted'
         "#,
     )
     .bind(&name)
@@ -327,7 +327,7 @@ async fn delete_person(
         "status": existing.status.clone(),
     });
 
-    sqlx::query("UPDATE persons SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status != 'deleted'")
+    sqlx::query("UPDATE persons SET status = 'deleted', updated_at = utc_text() WHERE id = $1 AND status != 'deleted'")
         .bind(&person_id)
         .execute(&state.pool)
         .await
@@ -403,8 +403,9 @@ async fn link_case(
     let link_id = Uuid::new_v4().to_string();
     let inserted = sqlx::query(
         r#"
-        INSERT OR IGNORE INTO person_case_links (id, person_id, case_id, role_type, role_detail, involved_date)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO person_case_links (id, person_id, case_id, role_type, role_detail, involved_date)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (person_id, case_id, role_type) DO NOTHING
         "#,
     )
     .bind(&link_id)
@@ -471,7 +472,7 @@ async fn fetch_person_with_access(
           p.created_at,
           p.updated_at
         FROM persons p
-        WHERE p.id = ?1
+        WHERE p.id = $1
           AND p.status != 'deleted'
           AND EXISTS (
                 SELECT 1
@@ -479,9 +480,9 @@ async fn fetch_person_with_access(
                 JOIN cases c ON c.id = l.case_id
                 WHERE l.person_id = p.id
                   AND c.status != 'deleted'
-                  AND (c.owner_id = ?2 OR EXISTS (
+                  AND (c.owner_id = $2 OR EXISTS (
                         SELECT 1 FROM case_members m
-                        WHERE m.case_id = c.id AND m.user_id = ?2
+                        WHERE m.case_id = c.id AND m.user_id = $2
                   ))
           )
         LIMIT 1
@@ -507,11 +508,11 @@ async fn primary_writable_case_for_person(
         SELECT l.case_id
         FROM person_case_links l
         JOIN cases c ON c.id = l.case_id
-        LEFT JOIN case_members m ON m.case_id = c.id AND m.user_id = ?2
-        WHERE l.person_id = ?1
+        LEFT JOIN case_members m ON m.case_id = c.id AND m.user_id = $2
+        WHERE l.person_id = $1
           AND c.status != 'deleted'
           AND (
-            c.owner_id = ?2
+            c.owner_id = $2
             OR (m.role_in_case IN ('owner', 'member'))
           )
         ORDER BY l.created_at DESC
@@ -537,11 +538,11 @@ async fn fetch_person_links(
         SELECT l.case_id, l.role_type, l.role_detail, l.involved_date, l.created_at
         FROM person_case_links l
         JOIN cases c ON c.id = l.case_id
-        WHERE l.person_id = ?1
+        WHERE l.person_id = $1
           AND c.status != 'deleted'
-          AND (c.owner_id = ?2 OR EXISTS (
+          AND (c.owner_id = $2 OR EXISTS (
                 SELECT 1 FROM case_members m
-                WHERE m.case_id = c.id AND m.user_id = ?2
+                WHERE m.case_id = c.id AND m.user_id = $2
           ))
         ORDER BY l.created_at DESC
         "#,

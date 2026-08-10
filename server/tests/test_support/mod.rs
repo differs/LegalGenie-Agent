@@ -6,23 +6,133 @@ use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use legalminds_server::{router, AppConfig, AppEnv, AppState, CorsOrigins};
 use serde_json::json;
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
 
-pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, SqlitePool) {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("connect sqlite memory");
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
-        .await
-        .expect("pragma foreign_keys");
+/// Test database URL; the dev/CI postgres must accept these credentials.
+const TEST_DB_URL: &str = "postgres://legalgenie:legalgenie_dev@127.0.0.1:5432/legalgenie";
 
-    sqlx::migrate!("./migrations")
+static PG_EXT_READY: OnceLock<()> = OnceLock::new();
+
+/// Builds an isolated-schema pool + temp dirs without an AppState/router.
+/// Used by tests that need a custom AppState (e.g. fake translation provider).
+pub async fn test_pool_and_tmp() -> (PgPool, TempDir) {
+    let (pool, tmp) = {
+        let schema = unique_schema_name();
+        ensure_pg_trgm().await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(TEST_DB_URL)
+            .await
+            .expect("connect postgres admin");
+
+        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+            .execute(&admin)
+            .await
+            .expect("create schema");
+
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .after_connect(move |conn, _meta| {
+                let schema = schema.clone();
+                Box::pin(async move {
+                    sqlx::query(&format!("SET search_path = \"{schema}\", public"))
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(TEST_DB_URL)
+            .await
+            .expect("connect postgres");
+
+        sqlx::migrate!("./migrations_pg")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let tmp = TempDir::new().expect("tempdir");
+        let storage_path = tmp.path().join("storage");
+        let temp_path = storage_path.join("temp");
+        let tessdata_dir = tmp.path().join("tessdata");
+
+        tokio::fs::create_dir_all(&storage_path)
+            .await
+            .expect("create storage");
+        tokio::fs::create_dir_all(&temp_path)
+            .await
+            .expect("create temp");
+        tokio::fs::create_dir_all(&tessdata_dir)
+            .await
+            .expect("create tessdata");
+
+        (pool, tmp)
+    };
+    (pool, tmp)
+}
+
+async fn ensure_pg_trgm() {
+    let bootstrap = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(TEST_DB_URL)
+        .await
+        .expect("connect postgres (is docker legalgenie-pg running?)");
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        .execute(&bootstrap)
+        .await
+        .expect("create pg_trgm extension");
+}
+
+fn unique_schema_name() -> String {
+    format!("t_{}_{:08x}", std::process::id(), fast_random_u32())
+}
+
+/// Builds a standard test app/router with an isolated schema.
+pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, PgPool) {
+    // The trigram extension is database-global; create it once up front to
+    // avoid CREATE EXTENSION races between parallel tests.
+    PG_EXT_READY.get_or_init(|| ());
+    ensure_pg_trgm().await;
+
+    // Unique schema per app instance (parallel-safe).
+    let schema = unique_schema_name();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(TEST_DB_URL)
+        .await
+        .expect("connect postgres admin");
+
+    sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+        .execute(&admin)
+        .await
+        .expect("create schema");
+
+    // App pool scoped to the schema. `after_connect` re-applies the search
+    // path to every pooled connection.
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(Duration::from_secs(10))
+        .after_connect(move |conn, _meta| {
+            let schema = schema.clone();
+            Box::pin(async move {
+                sqlx::query(&format!("SET search_path = \"{schema}\", public"))
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(TEST_DB_URL)
+        .await
+        .expect("connect postgres");
+
+    sqlx::migrate!("./migrations_pg")
         .run(&pool)
         .await
         .expect("migrate");
@@ -46,7 +156,7 @@ pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, SqlitePool) {
         app_env: AppEnv::Test,
         server_host: "127.0.0.1".to_string(),
         server_port: 0,
-        database_url: "sqlite::memory:".to_string(),
+        database_url: TEST_DB_URL.to_string(),
         cors_origins: CorsOrigins::Any,
         force_https: false,
         trust_proxy_headers: false,
@@ -73,6 +183,17 @@ pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, SqlitePool) {
     let state = AppState::new(cfg, pool);
     let pool = state.pool.clone();
     (router(state), tmp, pool)
+}
+
+/// Small non-cryptographic unique suffix for schema names.
+fn fast_random_u32() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    // Mix in a cheap counter so same-nanosecond calls still differ.
+    nanos ^ (nanos.rotate_left(13)) ^ std::process::id().rotate_left(17)
 }
 
 pub async fn request_json(
@@ -183,7 +304,7 @@ pub async fn register_user(app: &axum::Router, username: &str, email: &str) -> (
         }),
     )
     .await;
-    assert_eq!(resp.0, StatusCode::OK);
+    assert_eq!(resp.0, StatusCode::OK, "register failed: {:?}", resp.1);
 
     let user_id = resp.1["data"]["user"]["id"]
         .as_str()

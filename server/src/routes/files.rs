@@ -234,9 +234,9 @@ async fn list_file_chunks(
             translation_error,
             anchor_json
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         ORDER BY chunk_index ASC
-        LIMIT ?2 OFFSET ?3
+        LIMIT $2 OFFSET $3
         "#,
     )
     .bind(&row.id)
@@ -285,7 +285,7 @@ async fn delete_file(
 
     // Soft delete only. Keep physical files for auditability (can be cleaned up later).
     sqlx::query(
-        "UPDATE evidence_files SET status = 'deleted' WHERE id = ?1 AND status != 'deleted'",
+        "UPDATE evidence_files SET status = 'deleted' WHERE id = $1 AND status != 'deleted'",
     )
     .bind(&row.id)
     .execute(&state.pool)
@@ -476,7 +476,7 @@ async fn retry_file_translation(
         r#"
         SELECT id
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         ORDER BY chunk_index ASC
         "#,
     )
@@ -515,11 +515,11 @@ async fn retry_file_translation(
                     translation_status = 'pending',
                     retry_count = 0,
                     last_attempt_at = NULL,
-                    next_retry_at = CURRENT_TIMESTAMP,
+                    next_retry_at = utc_text(),
                     translation_error = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?1
-                  AND evidence_id = ?2
+                    updated_at = utc_text()
+                WHERE id = $1
+                  AND evidence_id = $2
                   AND translation_status IN ('pending', 'failed')
                 "#,
             )
@@ -713,7 +713,7 @@ async fn fetch_file_row(
             translation_model,
             created_at
         FROM evidence_files
-        WHERE id = ?1 AND status != 'deleted'
+        WHERE id = $1 AND status != 'deleted'
         LIMIT 1
         "#,
     )
@@ -756,14 +756,14 @@ async fn refresh_file_translation_snapshot(state: &AppState, file_id: &str) -> A
             (
                 SELECT translation_error
                 FROM evidence_file_chunks
-                WHERE evidence_id = ?1
+                WHERE evidence_id = $1
                   AND translation_status = 'failed'
                   AND translation_error IS NOT NULL
                 ORDER BY updated_at DESC, chunk_index DESC
                 LIMIT 1
             ) AS latest_error
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         "#,
     )
     .bind(file_id)
@@ -792,11 +792,11 @@ async fn refresh_file_translation_snapshot(state: &AppState, file_id: &str) -> A
         r#"
         UPDATE evidence_files
         SET
-            translation_status = ?1,
-            translation_error = ?2,
-            translated_chunk_count = ?3,
-            failed_chunk_count = ?4
-        WHERE id = ?5 AND status != 'deleted'
+            translation_status = $1,
+            translation_error = $2,
+            translated_chunk_count = $3,
+            failed_chunk_count = $4
+        WHERE id = $5 AND status != 'deleted'
         "#,
     )
     .bind(status)

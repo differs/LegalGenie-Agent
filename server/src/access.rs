@@ -1,10 +1,10 @@
 use crate::errors::{AppError, AppResult};
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use uuid::Uuid;
 
-pub async fn ensure_case_access(pool: &SqlitePool, user_id: Uuid, case_id: &str) -> AppResult<()> {
+pub async fn ensure_case_access(pool: &PgPool, user_id: Uuid, case_id: &str) -> AppResult<()> {
     let row: Option<(String, String)> =
-        sqlx::query_as("SELECT owner_id, status FROM cases WHERE id = ?1 LIMIT 1")
+        sqlx::query_as("SELECT owner_id, status FROM cases WHERE id = $1 LIMIT 1")
             .bind(case_id)
             .fetch_optional(pool)
             .await
@@ -22,13 +22,14 @@ pub async fn ensure_case_access(pool: &SqlitePool, user_id: Uuid, case_id: &str)
         return Ok(());
     }
 
-    let member: Option<(i64,)> =
-        sqlx::query_as("SELECT 1 FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1")
-            .bind(case_id)
-            .bind(user_id.to_string())
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+    let member: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1::bigint FROM case_members WHERE case_id = $1 AND user_id = $2 LIMIT 1",
+    )
+    .bind(case_id)
+    .bind(user_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
 
     if member.is_some() {
         Ok(())
@@ -38,12 +39,12 @@ pub async fn ensure_case_access(pool: &SqlitePool, user_id: Uuid, case_id: &str)
 }
 
 pub async fn ensure_case_write_access(
-    pool: &SqlitePool,
+    pool: &PgPool,
     user_id: Uuid,
     case_id: &str,
 ) -> AppResult<()> {
     let row: Option<(String, String)> =
-        sqlx::query_as("SELECT owner_id, status FROM cases WHERE id = ?1 LIMIT 1")
+        sqlx::query_as("SELECT owner_id, status FROM cases WHERE id = $1 LIMIT 1")
             .bind(case_id)
             .fetch_optional(pool)
             .await
@@ -62,7 +63,7 @@ pub async fn ensure_case_write_access(
     }
 
     let member_role: Option<(String,)> = sqlx::query_as(
-        "SELECT role_in_case FROM case_members WHERE case_id = ?1 AND user_id = ?2 LIMIT 1",
+        "SELECT role_in_case FROM case_members WHERE case_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(case_id)
     .bind(user_id.to_string())
@@ -78,9 +79,9 @@ pub async fn ensure_case_write_access(
     }
 }
 
-pub async fn ensure_case_owner(pool: &SqlitePool, user_id: Uuid, case_id: &str) -> AppResult<()> {
+pub async fn ensure_case_owner(pool: &PgPool, user_id: Uuid, case_id: &str) -> AppResult<()> {
     let row: Option<(String, String)> =
-        sqlx::query_as("SELECT owner_id, status FROM cases WHERE id = ?1 LIMIT 1")
+        sqlx::query_as("SELECT owner_id, status FROM cases WHERE id = $1 LIMIT 1")
             .bind(case_id)
             .fetch_optional(pool)
             .await

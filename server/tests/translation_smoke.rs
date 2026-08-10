@@ -7,7 +7,7 @@ use legalminds_server::translation::{
 };
 use legalminds_server::{router, AppConfig, AppEnv, AppState, CorsOrigins, TranslationConfig};
 use serde_json::Value;
-use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use sqlx::{PgPool, Row};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -140,13 +140,15 @@ impl TranslationProvider for FakeTranslationProvider {
 async fn translated_chunk_schema_is_available() {
     let (_app, _state, _tmp, pool, _provider) = build_test_app_with_fake_translation().await;
 
-    let file_columns = sqlx::query("PRAGMA table_info(evidence_files)")
-        .fetch_all(&pool)
-        .await
-        .expect("query evidence_files schema")
-        .into_iter()
-        .map(|r| r.get::<String, _>("name"))
-        .collect::<Vec<_>>();
+    let file_columns = sqlx::query(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'evidence_files'",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("query evidence_files schema")
+    .into_iter()
+    .map(|r| r.get::<String, _>("column_name"))
+    .collect::<Vec<_>>();
 
     for expected in [
         "translation_status",
@@ -165,13 +167,15 @@ async fn translated_chunk_schema_is_available() {
         );
     }
 
-    let chunk_columns = sqlx::query("PRAGMA table_info(evidence_file_chunks)")
-        .fetch_all(&pool)
-        .await
-        .expect("query evidence_file_chunks schema")
-        .into_iter()
-        .map(|r| r.get::<String, _>("name"))
-        .collect::<Vec<_>>();
+    let chunk_columns = sqlx::query(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'evidence_file_chunks'",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("query evidence_file_chunks schema")
+    .into_iter()
+    .map(|r| r.get::<String, _>("column_name"))
+    .collect::<Vec<_>>();
 
     for expected in [
         "id",
@@ -233,7 +237,7 @@ async fn parsing_auto_starts_translation() {
             failed_chunk_count,
             chunk_count
         FROM evidence_files
-        WHERE id = ?1
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -277,7 +281,7 @@ async fn parsing_auto_starts_translation() {
             translation_status,
             retry_count
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         ORDER BY chunk_index ASC
         "#,
     )
@@ -333,7 +337,7 @@ async fn missing_provider_source_language_falls_back_to_heuristic() {
         r#"
         SELECT source_language
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         LIMIT 1
         "#,
     )
@@ -350,7 +354,7 @@ async fn missing_provider_source_language_falls_back_to_heuristic() {
         r#"
         SELECT source_language
         FROM evidence_files
-        WHERE id = ?1
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -380,7 +384,7 @@ async fn parsing_persists_chunk_source_fields() {
             parse_status,
             chunk_count
         FROM evidence_files
-        WHERE id = ?1
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -401,7 +405,7 @@ async fn parsing_persists_chunk_source_fields() {
             source_text_hash,
             anchor_json
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         ORDER BY chunk_index ASC
         "#,
     )
@@ -511,7 +515,7 @@ async fn translation_failures_aggregate_to_partial_or_failed() {
             translated_chunk_count,
             failed_chunk_count
         FROM evidence_files
-        WHERE id = ?1
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -539,7 +543,7 @@ async fn translation_failures_aggregate_to_partial_or_failed() {
             next_retry_at,
             translation_error
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1 AND source_text = 'Alpha'
+        WHERE evidence_id = $1 AND source_text = 'Alpha'
         LIMIT 1
         "#,
     )
@@ -579,7 +583,7 @@ async fn translation_failures_aggregate_to_partial_or_failed() {
             translated_chunk_count,
             failed_chunk_count
         FROM evidence_files
-        WHERE id = ?1
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -749,7 +753,7 @@ async fn successful_chunks_are_not_overwritten_on_retry() {
     assert_eq!(provider.call_count("Beta"), 1);
 
     sqlx::query(
-        "UPDATE evidence_file_chunks SET next_retry_at = CURRENT_TIMESTAMP WHERE evidence_id = ?1 AND translation_status = 'failed'",
+        "UPDATE evidence_file_chunks SET next_retry_at = utc_text() WHERE evidence_id = $1 AND translation_status = 'failed'",
     )
     .bind(&evidence_id)
     .execute(&pool)
@@ -1086,7 +1090,7 @@ async fn global_search_accepts_language_mode_for_evidence_hits() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(search.0, StatusCode::OK);
+    assert_eq!(search.0, StatusCode::OK, "search#1 body: {:?}", search.1);
 
     let hit = find_evidence_result(&search.1["data"]["results"], &evidence_id);
     assert_eq!(hit["object_type"].as_str(), Some("evidence"));
@@ -1126,7 +1130,7 @@ async fn evidence_search_defaults_to_zh_mode() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(search.0, StatusCode::OK);
+    assert_eq!(search.0, StatusCode::OK, "search#2 body: {:?}", search.1);
     let hit = find_evidence_result(&search.1["data"]["results"], &evidence_id);
     assert_eq!(hit["language_mode"].as_str(), Some("zh"));
     assert_eq!(hit["matched_language"].as_str(), Some("translated"));
@@ -1213,7 +1217,7 @@ async fn evidence_search_matches_file_name_for_chunked_files() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(search.0, StatusCode::OK);
+    assert_eq!(search.0, StatusCode::OK, "search#3 body: {:?}", search.1);
     let hit = find_evidence_result(&search.1["data"]["results"], &evidence_id);
     assert_eq!(hit["file_name"].as_str(), Some("invoice-2026-bridge.txt"));
     assert_eq!(hit["source_fallback"].as_bool(), Some(false));
@@ -1246,14 +1250,14 @@ async fn evidence_search_legacy_files_fall_back_to_parsed_text_for_source_and_bi
         SET chunk_count = 0,
             translated_chunk_count = 0,
             failed_chunk_count = 0
-        WHERE id = ?1
+        WHERE id = $1
         "#,
     )
     .bind(&evidence_id)
     .execute(&pool)
     .await
     .expect("reset chunk counters for legacy fallback");
-    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
+    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = $1")
         .bind(&evidence_id)
         .execute(&pool)
         .await
@@ -1331,14 +1335,14 @@ async fn evidence_search_legacy_files_fall_back_to_parsed_text_for_zh() {
         SET chunk_count = 0,
             translated_chunk_count = 0,
             failed_chunk_count = 0
-        WHERE id = ?1
+        WHERE id = $1
         "#,
     )
     .bind(&evidence_id)
     .execute(&pool)
     .await
     .expect("reset chunk counters for legacy zh fallback");
-    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
+    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = $1")
         .bind(&evidence_id)
         .execute(&pool)
         .await
@@ -1444,14 +1448,14 @@ async fn chunks_endpoint_returns_409_when_parse_is_incomplete() {
             duration = NULL,
             parsed_at = NULL,
             chunk_count = 0
-        WHERE id = ?1
+        WHERE id = $1
         "#,
     )
     .bind(&evidence_id)
     .execute(&pool)
     .await
     .expect("force parse incomplete state");
-    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = ?1")
+    sqlx::query("DELETE FROM evidence_file_chunks WHERE evidence_id = $1")
         .bind(&evidence_id)
         .execute(&pool)
         .await
@@ -1544,7 +1548,7 @@ async fn retry_all_and_selected_skip_done_chunks_without_overwriting_text() {
         r#"
         SELECT id, source_text, translation_status
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1
+        WHERE evidence_id = $1
         ORDER BY chunk_index ASC
         "#,
     )
@@ -1898,7 +1902,7 @@ async fn retry_does_not_drift_locked_provider_or_model() {
             translation_provider,
             translation_model
         FROM evidence_files
-        WHERE id = ?1
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -1928,7 +1932,7 @@ async fn retry_does_not_drift_locked_provider_or_model() {
             next_retry_at,
             translation_error
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1 AND source_text = 'Beta'
+        WHERE evidence_id = $1 AND source_text = 'Beta'
         LIMIT 1
         "#,
     )
@@ -1952,7 +1956,7 @@ async fn build_test_app_with_fake_translation() -> (
     axum::Router,
     AppState,
     TempDir,
-    SqlitePool,
+    PgPool,
     FakeTranslationProvider,
 ) {
     build_test_app_with_named_translation(
@@ -1976,7 +1980,7 @@ async fn build_test_app_with_fake_translation_concurrency(
     axum::Router,
     AppState,
     TempDir,
-    SqlitePool,
+    PgPool,
     FakeTranslationProvider,
 ) {
     build_test_app_with_named_translation(
@@ -1998,7 +2002,7 @@ async fn build_test_app_with_disabled_translation() -> (
     axum::Router,
     AppState,
     TempDir,
-    SqlitePool,
+    PgPool,
     FakeTranslationProvider,
 ) {
     build_test_app_with_named_translation(
@@ -2023,44 +2027,19 @@ async fn build_test_app_with_named_translation(
     axum::Router,
     AppState,
     TempDir,
-    SqlitePool,
+    PgPool,
     FakeTranslationProvider,
 ) {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("connect sqlite memory");
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
-        .await
-        .expect("pragma foreign_keys");
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("migrate");
-
-    let tmp = TempDir::new().expect("tempdir");
+    let (pool, tmp) = test_support::test_pool_and_tmp().await;
     let storage_path = tmp.path().join("storage");
     let temp_path = storage_path.join("temp");
     let tessdata_dir = tmp.path().join("tessdata");
-
-    tokio::fs::create_dir_all(&storage_path)
-        .await
-        .expect("create storage");
-    tokio::fs::create_dir_all(&temp_path)
-        .await
-        .expect("create temp");
-    tokio::fs::create_dir_all(&tessdata_dir)
-        .await
-        .expect("create tessdata");
 
     let cfg = AppConfig {
         app_env: AppEnv::Test,
         server_host: "127.0.0.1".to_string(),
         server_port: 0,
-        database_url: "sqlite::memory:".to_string(),
+        database_url: "postgres://legalgenie:legalgenie_dev@127.0.0.1:5432/legalgenie".to_string(),
         cors_origins: CorsOrigins::Any,
         force_https: false,
         trust_proxy_headers: false,
@@ -2092,7 +2071,7 @@ async fn build_test_app_with_named_translation(
 }
 
 async fn wait_for_file_translation_status(
-    pool: &SqlitePool,
+    pool: &PgPool,
     file_id: &str,
     expected_statuses: &[&str],
 ) -> Value {
@@ -2105,7 +2084,7 @@ async fn wait_for_file_translation_status(
                 translated_chunk_count,
                 failed_chunk_count
             FROM evidence_files
-            WHERE id = ?1
+            WHERE id = $1
             LIMIT 1
             "#,
         )
@@ -2135,7 +2114,7 @@ async fn wait_for_file_translation_status(
             translated_chunk_count,
             failed_chunk_count
         FROM evidence_files
-        WHERE id = ?1
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -2152,12 +2131,12 @@ async fn wait_for_file_translation_status(
 }
 
 async fn chunk_translation_text(
-    pool: &SqlitePool,
+    pool: &PgPool,
     evidence_id: &str,
     source_text: &str,
 ) -> Option<String> {
     sqlx::query(
-        "SELECT translated_text FROM evidence_file_chunks WHERE evidence_id = ?1 AND source_text = ?2 LIMIT 1",
+        "SELECT translated_text FROM evidence_file_chunks WHERE evidence_id = $1 AND source_text = $2 LIMIT 1",
     )
     .bind(evidence_id)
     .bind(source_text)
@@ -2168,11 +2147,11 @@ async fn chunk_translation_text(
 }
 
 async fn wait_for_processing_mixed_file_state(
-    pool: &SqlitePool,
+    pool: &PgPool,
     evidence_id: &str,
     expected_done: i64,
     expected_failed: i64,
-) -> sqlx::sqlite::SqliteRow {
+) -> sqlx::postgres::PgRow {
     for _ in 0..100 {
         let row = sqlx::query(
             r#"
@@ -2184,7 +2163,7 @@ async fn wait_for_processing_mixed_file_state(
                 SUM(CASE WHEN c.translation_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
             FROM evidence_files f
             JOIN evidence_file_chunks c ON c.evidence_id = f.id
-            WHERE f.id = ?1
+            WHERE f.id = $1
             GROUP BY f.id
             LIMIT 1
             "#,
@@ -2211,9 +2190,9 @@ async fn wait_for_processing_mixed_file_state(
     panic!("file {evidence_id} did not reach mixed processing state");
 }
 
-async fn force_failed_chunk_due_now(pool: &SqlitePool, evidence_id: &str) {
+async fn force_failed_chunk_due_now(pool: &PgPool, evidence_id: &str) {
     sqlx::query(
-        "UPDATE evidence_file_chunks SET next_retry_at = CURRENT_TIMESTAMP WHERE evidence_id = ?1 AND translation_status = 'failed'",
+        "UPDATE evidence_file_chunks SET next_retry_at = utc_text() WHERE evidence_id = $1 AND translation_status = 'failed'",
     )
     .bind(evidence_id)
     .execute(pool)
@@ -2222,11 +2201,11 @@ async fn force_failed_chunk_due_now(pool: &SqlitePool, evidence_id: &str) {
 }
 
 async fn wait_for_chunk_retry_count(
-    pool: &SqlitePool,
+    pool: &PgPool,
     evidence_id: &str,
     source_text: &str,
     expected_retry_count: i64,
-) -> sqlx::sqlite::SqliteRow {
+) -> sqlx::postgres::PgRow {
     for _ in 0..100 {
         let row = sqlx::query(
             r#"
@@ -2235,7 +2214,7 @@ async fn wait_for_chunk_retry_count(
                 retry_count,
                 next_retry_at
             FROM evidence_file_chunks
-            WHERE evidence_id = ?1 AND source_text = ?2
+            WHERE evidence_id = $1 AND source_text = $2
             LIMIT 1
             "#,
         )
@@ -2282,10 +2261,10 @@ fn local_source_text_hash(text: &str) -> String {
     format!("{hash:016x}")
 }
 
-async fn wait_for_file_translation_error(pool: &SqlitePool, evidence_id: &str, needle: &str) {
+async fn wait_for_file_translation_error(pool: &PgPool, evidence_id: &str, needle: &str) {
     for _ in 0..100 {
         let error =
-            sqlx::query("SELECT translation_error FROM evidence_files WHERE id = ?1 LIMIT 1")
+            sqlx::query("SELECT translation_error FROM evidence_files WHERE id = $1 LIMIT 1")
                 .bind(evidence_id)
                 .fetch_one(pool)
                 .await
@@ -2303,8 +2282,8 @@ async fn wait_for_file_translation_error(pool: &SqlitePool, evidence_id: &str, n
     panic!("file {evidence_id} did not reach translation_error containing {needle}");
 }
 
-async fn fetch_file_parsed_at(pool: &SqlitePool, evidence_id: &str) -> String {
-    sqlx::query("SELECT parsed_at FROM evidence_files WHERE id = ?1 LIMIT 1")
+async fn fetch_file_parsed_at(pool: &PgPool, evidence_id: &str) -> String {
+    sqlx::query("SELECT parsed_at FROM evidence_files WHERE id = $1 LIMIT 1")
         .bind(evidence_id)
         .fetch_one(pool)
         .await
@@ -2313,11 +2292,11 @@ async fn fetch_file_parsed_at(pool: &SqlitePool, evidence_id: &str) -> String {
 }
 
 async fn wait_for_chunk_status(
-    pool: &SqlitePool,
+    pool: &PgPool,
     evidence_id: &str,
     source_text: &str,
     expected_status: &str,
-) -> sqlx::sqlite::SqliteRow {
+) -> sqlx::postgres::PgRow {
     for _ in 0..100 {
         let row = fetch_chunk_state(pool, evidence_id, source_text).await;
         if row.get::<String, _>("translation_status") == expected_status {
@@ -2330,10 +2309,10 @@ async fn wait_for_chunk_status(
 }
 
 async fn fetch_chunk_state(
-    pool: &SqlitePool,
+    pool: &PgPool,
     evidence_id: &str,
     source_text: &str,
-) -> sqlx::sqlite::SqliteRow {
+) -> sqlx::postgres::PgRow {
     sqlx::query(
         r#"
         SELECT
@@ -2343,7 +2322,7 @@ async fn fetch_chunk_state(
             translated_text,
             last_attempt_at
         FROM evidence_file_chunks
-        WHERE evidence_id = ?1 AND source_text = ?2
+        WHERE evidence_id = $1 AND source_text = $2
         LIMIT 1
         "#,
     )
@@ -2354,12 +2333,12 @@ async fn fetch_chunk_state(
     .expect("fetch chunk state")
 }
 
-async fn mark_chunk_processing_stale(pool: &SqlitePool, evidence_id: &str, source_text: &str) {
+async fn mark_chunk_processing_stale(pool: &PgPool, evidence_id: &str, source_text: &str) {
     sqlx::query(
         r#"
         UPDATE evidence_file_chunks
         SET last_attempt_at = '2000-01-01 00:00:00'
-        WHERE evidence_id = ?1 AND source_text = ?2
+        WHERE evidence_id = $1 AND source_text = $2
         "#,
     )
     .bind(evidence_id)
@@ -2369,12 +2348,12 @@ async fn mark_chunk_processing_stale(pool: &SqlitePool, evidence_id: &str, sourc
     .expect("mark chunk processing stale");
 }
 
-async fn force_failed_or_pending_chunk_due_now(pool: &SqlitePool, evidence_id: &str) {
+async fn force_failed_or_pending_chunk_due_now(pool: &PgPool, evidence_id: &str) {
     sqlx::query(
         r#"
         UPDATE evidence_file_chunks
-        SET next_retry_at = CURRENT_TIMESTAMP
-        WHERE evidence_id = ?1
+        SET next_retry_at = utc_text()
+        WHERE evidence_id = $1
           AND translation_status IN ('failed', 'pending')
         "#,
     )

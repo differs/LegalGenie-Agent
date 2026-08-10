@@ -15,7 +15,7 @@ use axum::{
 };
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, Sqlite};
+use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -158,7 +158,7 @@ async fn export_logs(
     const MAX_EXPORT_ROWS: i64 = 10_000;
 
     let rows: Vec<LogRow> = {
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"
             SELECT
               l.id,
@@ -445,7 +445,7 @@ async fn list_logs(
     let offset = (page - 1) * page_size;
 
     let total: (i64,) = {
-        let mut qb: QueryBuilder<Sqlite> =
+        let mut qb: QueryBuilder<Postgres> =
             QueryBuilder::new("SELECT COUNT(1) FROM operation_logs l WHERE ");
         apply_filters(
             &mut qb,
@@ -467,7 +467,7 @@ async fn list_logs(
     };
 
     let rows: Vec<LogRow> = {
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"
             SELECT
               l.id,
@@ -568,7 +568,7 @@ async fn target_history(
         r#"
         SELECT user_id, user_name, case_id, action, old_value, new_value, created_at
         FROM operation_logs
-        WHERE target_type = ?1 AND target_id = ?2
+        WHERE target_type = $1 AND target_id = $2
         ORDER BY created_at ASC
         "#,
     )
@@ -627,7 +627,7 @@ fn normalize_history_target_type(raw: &str) -> &str {
 }
 
 fn apply_filters(
-    qb: &mut QueryBuilder<Sqlite>,
+    qb: &mut QueryBuilder<Postgres>,
     user: &AuthUser,
     is_admin: bool,
     user_id: Option<&str>,
@@ -679,15 +679,13 @@ fn apply_filters(
     }
 
     if let Some(start) = start_time {
-        qb.push(" AND l.created_at >= datetime(");
+        qb.push(" AND l.created_at >= ");
         qb.push_bind(start.to_string());
-        qb.push(")");
     }
 
     if let Some(end) = end_time {
-        qb.push(" AND l.created_at <= datetime(");
+        qb.push(" AND l.created_at <= ");
         qb.push_bind(end.to_string());
-        qb.push(")");
     }
 
     if let Some(kw) = keyword {

@@ -139,7 +139,7 @@ async fn list_case_files(
     let offset = (page - 1) * page_size;
 
     let total: (i64,) = sqlx::query_as(
-        "SELECT COUNT(1) FROM evidence_files WHERE case_id = ?1 AND status != 'deleted'",
+        "SELECT COUNT(1) FROM evidence_files WHERE case_id = $1 AND status != 'deleted'",
     )
     .bind(&case_id)
     .fetch_one(&state.pool)
@@ -171,9 +171,9 @@ async fn list_case_files(
             translation_model,
             created_at
         FROM evidence_files
-        WHERE case_id = ?1 AND status != 'deleted'
+        WHERE case_id = $1 AND status != 'deleted'
         ORDER BY created_at DESC
-        LIMIT ?2 OFFSET ?3
+        LIMIT $2 OFFSET $3
         "#,
     )
     .bind(&case_id)
@@ -317,7 +317,7 @@ async fn upload_case_file(
             id, case_id, original_name, stored_name, file_type, file_size, storage_path,
             status, uploaded_by
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8)
         "#,
     )
     .bind(file_id.to_string())
@@ -361,7 +361,7 @@ async fn upload_case_file(
             translation_model,
             created_at
         FROM evidence_files
-        WHERE id = ?1
+        WHERE id = $1
         LIMIT 1
         "#,
     )

@@ -19,7 +19,7 @@ use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfSaveOptions, Pdf
 use resvg::{tiny_skia, usvg};
 use rust_xlsxwriter::Workbook;
 use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, Sqlite};
+use sqlx::{Postgres, QueryBuilder};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tokio_util::io::ReaderStream;
@@ -131,7 +131,7 @@ async fn export_history(
     let page_size = p.page_size.clamp(1, 200);
     let offset = (page - 1) * page_size;
 
-    let total: (i64,) = sqlx::query_as("SELECT COUNT(1) FROM export_records WHERE case_id = ?1")
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(1) FROM export_records WHERE case_id = $1")
         .bind(&case_id)
         .fetch_one(&state.pool)
         .await
@@ -152,9 +152,9 @@ async fn export_history(
           evidence_ids,
           template_name
         FROM export_records
-        WHERE case_id = ?1
+        WHERE case_id = $1
         ORDER BY generated_at DESC
-        LIMIT ?2 OFFSET ?3
+        LIMIT $2 OFFSET $3
         "#,
     )
     .bind(&case_id)
@@ -228,11 +228,11 @@ async fn export_evidence_list(
           e.page_count,
           e.duration,
           e.created_at,
-          group_concat(n.title, ' | ') AS related_nodes
+          string_agg(n.title, ' | ') AS related_nodes
         FROM evidence_files e
         LEFT JOIN node_evidence_links l ON l.evidence_id = e.id
         LEFT JOIN event_nodes n ON n.id = l.node_id AND n.status != 'deleted'
-        WHERE e.case_id = ?1 AND e.status != 'deleted'
+        WHERE e.case_id = $1 AND e.status != 'deleted'
         GROUP BY e.id
         ORDER BY e.created_at DESC
         "#,
@@ -248,7 +248,7 @@ async fn export_evidence_list(
         SELECT DISTINCT l.node_id
         FROM node_evidence_links l
         JOIN event_nodes n ON n.id = l.node_id
-        WHERE n.case_id = ?1 AND n.status != 'deleted'
+        WHERE n.case_id = $1 AND n.status != 'deleted'
         "#,
     )
     .bind(&case_id)
@@ -349,7 +349,7 @@ async fn export_evidence_list(
         INSERT INTO export_records (
           id, case_id, export_type, file_name, storage_path, file_size, generated_by, node_ids, evidence_ids
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(&record_id)
@@ -425,7 +425,7 @@ async fn download_export(
     let export_id = normalize_uuid(&export_id, "invalid export id")?;
 
     let row: Option<(String, String, String, Option<i64>)> = sqlx::query_as(
-        "SELECT export_type, file_name, storage_path, file_size FROM export_records WHERE id = ?1 AND case_id = ?2 LIMIT 1",
+        "SELECT export_type, file_name, storage_path, file_size FROM export_records WHERE id = $1 AND case_id = $2 LIMIT 1",
     )
     .bind(&export_id)
     .bind(&case_id)
@@ -521,7 +521,7 @@ async fn export_timeline(
 
     let (start, end) = parse_date_range(q.start_date.as_deref(), q.end_date.as_deref())?;
 
-    let case_name: Option<String> = sqlx::query_scalar("SELECT name FROM cases WHERE id = ?1")
+    let case_name: Option<String> = sqlx::query_scalar("SELECT name FROM cases WHERE id = $1")
         .bind(&case_id)
         .fetch_optional(&state.pool)
         .await
@@ -532,7 +532,7 @@ async fn export_timeline(
 
     const MAX_NODES: usize = 200;
     let nodes: Vec<TimelineNodeExportRow> = {
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"
             SELECT id, title, description, event_time
             FROM event_nodes
@@ -624,7 +624,7 @@ async fn export_timeline(
         INSERT INTO export_records (
           id, case_id, export_type, file_name, storage_path, file_size, generated_by, node_ids, evidence_ids
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(&record_id)
@@ -712,7 +712,7 @@ async fn export_timeline_report(
 
     let (start, end) = parse_date_range(q.start_date.as_deref(), q.end_date.as_deref())?;
 
-    let case_name: Option<String> = sqlx::query_scalar("SELECT name FROM cases WHERE id = ?1")
+    let case_name: Option<String> = sqlx::query_scalar("SELECT name FROM cases WHERE id = $1")
         .bind(&case_id)
         .fetch_optional(&state.pool)
         .await
@@ -723,7 +723,7 @@ async fn export_timeline_report(
 
     const MAX_NODES: usize = 200;
     let nodes: Vec<TimelineReportNodeRow> = {
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"
             SELECT
               n.id,
@@ -881,7 +881,7 @@ async fn export_timeline_report(
         INSERT INTO export_records (
           id, case_id, export_type, file_name, storage_path, file_size, generated_by, node_ids, evidence_ids, template_name
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(&record_id)
@@ -974,7 +974,7 @@ async fn fetch_evidence_ids_for_nodes(
         return Ok(Vec::new());
     }
 
-    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
         r#"
         SELECT DISTINCT l.evidence_id
         FROM node_evidence_links l

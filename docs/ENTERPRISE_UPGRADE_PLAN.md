@@ -168,9 +168,12 @@ LegalGenie Agent 当前成熟度为 **L4（Deliverable）**：单实例可交付
 
 **目标**：多实例部署、存储可扩展、中文检索升级。
 
-- [ ] P3-1 PostgreSQL 迁移
-  - 15 个 migration 双驱动（sqlx `sqlite`/`postgres` 编译特性并存）；迁移脚本 `scripts/migrate_sqlite_to_pg.py`（离线全量 + 增量同步模式）
-  - FTS 迁移：FTS5 → `tsvector` + `pg_trgm`（CJK 用 trigram，解决 G12）
+- [x] P3-1 PostgreSQL 迁移（提前完成：2026-08-10，作为 P1a）
+  - 后端完全切换 PostgreSQL 16（sqlx postgres 驱动）；17 个 migration 位于 `server/migrations_pg/`
+  - **存储层约定**：时间列 TEXT（UTC 'YYYY-MM-DD HH24:MI:SS'，`utc_text()`），保持 chrono-free 字符串语义；整型列 BIGINT；参数占位符统一 `$N`
+  - FTS 迁移：FTS5 → **pg_trgm 镜像表**（业务表触发器同步 `searchable` 合并列 + 分语言列），CJK trigram 解决 G12 中文分词（实测「补充协议」可命中）
+  - 语言模式列级过滤：zh/source 分别查 `searchable_translated`/`searchable_source`，bilingual 查合并列
+  - 数据迁移工具 `scripts/migrate_sqlite_to_pg.py`；docker-compose 增加 postgres service（healthcheck + volume）
 - [ ] P3-2 对象存储抽象
   - `ObjectStore` trait：`put/get/delete/presign`；本地 FS 实现（现有路径逻辑收拢）+ MinIO/S3 适配器
 - [ ] P3-3 多实例

@@ -1,5 +1,5 @@
 use serde_json::Value;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub struct OperationLogNew {
     pub request_id: Option<String>,
 }
 
-pub fn spawn_operation_log(pool: SqlitePool, mut log: OperationLogNew) {
+pub fn spawn_operation_log(pool: PgPool, mut log: OperationLogNew) {
     if log.changed_fields.is_none() {
         log.changed_fields = extract_changed_fields(&log.old_value, &log.new_value);
     }
@@ -32,7 +32,7 @@ pub fn spawn_operation_log(pool: SqlitePool, mut log: OperationLogNew) {
     });
 }
 
-async fn insert_operation_log(pool: &SqlitePool, log: OperationLogNew) -> anyhow::Result<()> {
+async fn insert_operation_log(pool: &PgPool, log: OperationLogNew) -> anyhow::Result<()> {
     let id = Uuid::new_v4().to_string();
     let old_value = log
         .old_value
@@ -77,7 +77,7 @@ async fn insert_operation_log(pool: &SqlitePool, log: OperationLogNew) -> anyhow
             request_id
         )
         VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
         )
         "#,
     )
