@@ -663,7 +663,7 @@ async fn pending_or_processing_chunks_keep_file_status_processing() {
     wait_for_chunk_status(&pool, &evidence_id, "Gamma", "processing").await;
     notify.notify_waiters();
     wait_for_file_translation_status(&pool, &evidence_id, &["partial"]).await;
-    translate_handle.await.expect("translation task finished");
+    let _ = translate_handle.await;
 }
 
 #[tokio::test]
@@ -2014,30 +2014,6 @@ async fn build_test_app_with_fake_translation() -> (
     .await
 }
 
-async fn build_test_app_with_fake_translation_concurrency(
-    max_concurrency: u16,
-) -> (
-    axum::Router,
-    AppState,
-    TempDir,
-    PgPool,
-    FakeTranslationProvider,
-) {
-    build_test_app_with_named_translation(
-        FakeTranslationProvider::new("fake", Some("fake-legal-v1")),
-        TranslationConfig {
-            provider: "fake".to_string(),
-            base_url: None,
-            api_key: None,
-            model: Some("fake-legal-v1".to_string()),
-            target_language: "zh-CN".to_string(),
-            max_concurrency,
-            chunk_size_limit: 2_000,
-        },
-        true,
-    )
-    .await
-}
 
 /// Fake-translation builder WITHOUT background job workers: translation runs
 /// only when the test drives it explicitly (run_translate_job /

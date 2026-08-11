@@ -1380,3 +1380,119 @@ fn normalize_uuid(raw: &str, message: &str) -> AppResult<String> {
 // Ensure we don't accidentally return a 200 on a handler that forgot to wrap `AppResult`.
 #[allow(dead_code)]
 fn _assert_case_exports_router_state(_: Router<AppState>) {}
+
+// ---------- Agent-facing export helpers (P2) ----------
+
+/// Generates the evidence-list xlsx and records the export, returning
+/// `(record_id, file_name)`. Used by the agent `export_evidence_list` tool.
+pub(crate) async fn agent_export_evidence_list(
+    state: &AppState,
+    case_id: &str,
+    user_id: &str,
+) -> anyhow::Result<(String, String)> {
+    let rows: Vec<EvidenceExportRow> = sqlx::query_as(
+        r#"
+        SELECT
+          e.id,
+          e.original_name,
+          e.file_type,
+          e.file_size,
+          e.parse_status,
+          e.page_count,
+          e.duration,
+          e.created_at,
+          string_agg(n.title, ' | ') AS related_nodes
+        FROM evidence_files e
+        LEFT JOIN node_evidence_links l ON l.evidence_id = e.id
+        LEFT JOIN event_nodes n ON n.id = l.node_id AND n.status != 'deleted'
+        WHERE e.case_id = $1 AND e.status != 'deleted'
+        GROUP BY e.id
+        ORDER BY e.created_at DESC
+        "#,
+    )
+    .bind(case_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    let _ = worksheet.set_name("Evidence List");
+
+    let headers = [
+        "evidence_id",
+        "original_name",
+        "file_type",
+        "file_size",
+        "parse_status",
+        "page_count",
+        "duration",
+        "created_at",
+        "related_nodes",
+    ];
+    for (col, h) in headers.iter().enumerate() {
+        worksheet.write_string(0, col as u16, *h)?;
+    }
+    for (idx, r) in rows.iter().enumerate() {
+        let row = (idx + 1) as u32;
+        worksheet.write_string(row, 0, &r.id)?;
+        worksheet.write_string(row, 1, &r.original_name)?;
+        worksheet.write_string(row, 2, &r.file_type)?;
+        worksheet.write_string(row, 3, &r.file_size.to_string())?;
+        worksheet.write_string(row, 4, &r.parse_status)?;
+        worksheet.write_string(
+            row,
+            5,
+            &r.page_count.map(|v| v.to_string()).unwrap_or_default(),
+        )?;
+        worksheet.write_string(
+            row,
+            6,
+            &r.duration.map(|v| v.to_string()).unwrap_or_default(),
+        )?;
+        worksheet.write_string(row, 7, &r.created_at)?;
+        worksheet.write_string(row, 8, r.related_nodes.as_deref().unwrap_or(""))?;
+    }
+
+    let bytes = workbook.save_to_buffer()?;
+    let file_name = format!(
+        "{}_evidence_list_{}.xlsx",
+        &case_id,
+        chrono::Utc::now().format("%Y%m%d_%H%M%S")
+    );
+    let storage_path = format!("exports/{}/{}", case_id, file_name);
+    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+    if let Some(parent) = full_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(&full_path, &bytes).await?;
+
+    let record_id = Uuid::new_v4().to_string();
+    let node_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT l.node_id FROM node_evidence_links l JOIN event_nodes n ON n.id = l.node_id WHERE n.case_id = $1 AND n.status != 'deleted'",
+    )
+    .bind(case_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let evidence_ids = rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        INSERT INTO export_records (
+          id, case_id, export_type, file_name, storage_path, file_size, generated_by, node_ids, evidence_ids
+        )
+        VALUES ($1, $2, 'evidence_list', $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(&record_id)
+    .bind(case_id)
+    .bind(&file_name)
+    .bind(&storage_path)
+    .bind(bytes.len() as i64)
+    .bind(user_id)
+    .bind(serde_json::to_string(&node_ids)?)
+    .bind(serde_json::to_string(&evidence_ids)?)
+    .execute(&state.pool)
+    .await?;
+
+    Ok((record_id, file_name))
+}

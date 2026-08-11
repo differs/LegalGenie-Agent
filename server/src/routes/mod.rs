@@ -14,8 +14,8 @@ use axum::{
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-mod auth;
-mod case_exports;
+pub(crate) mod auth;
+pub(crate) mod case_exports;
 mod case_files;
 mod case_members;
 mod case_persons;
@@ -41,7 +41,8 @@ pub fn router(state: AppState) -> Router {
         .nest("/persons", persons::router())
         .nest("/search", search::router())
         .nest("/timeline", timeline::router())
-        .nest("/logs", logs::router());
+        .nest("/logs", logs::router())
+        .nest("/agent", crate::agent::routes::router());
 
     Router::new()
         .nest("/api/v1", api)

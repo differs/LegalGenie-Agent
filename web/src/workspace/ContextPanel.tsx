@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import {
   AlertTriangle,
@@ -13,22 +13,100 @@ import {
 } from 'lucide-react'
 import { useWorkspace } from './Workbench'
 import type { ApprovalItem } from '../lib/agent'
-import { parseFile, unlinkEvidenceFromNode, updateNode, downloadFile } from '../lib/api'
-import { formatBytes, formatDate, parseStatusLabel, translationStatusLabel } from '../lib/hooks'
-import { useToasts } from '../lib/hooks'
+import {
+  parseFile,
+  unlinkEvidenceFromNode,
+  updateNode,
+  downloadFile,
+  fetchPendingApprovals,
+  confirmApproval as apiConfirmApproval,
+  rejectApproval as apiRejectApproval,
+  type PendingApproval,
+} from '../lib/api'
+import {
+  formatBytes,
+  formatDate,
+  parseStatusLabel,
+  translationStatusLabel,
+  usePolling,
+  useToasts,
+} from '../lib/hooks'
 
 // ---------- Approval queue ----------
 
 export function ContextPanel({
-  approvals,
   onConfirm,
   onReject,
 }: {
-  approvals: ApprovalItem[]
   onConfirm: (a: ApprovalItem) => void
   onReject: (a: ApprovalItem) => void
 }) {
-  const { selection } = useWorkspace()
+  const { selection, token, caseId, bump, dataTick } = useWorkspace()
+  const { ok, error } = useToasts()
+  const [approvals, setApprovals] = useState<PendingApproval[]>([])
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!token || !caseId) {
+      setApprovals([])
+      return
+    }
+    let alive = true
+    setLoading(true)
+    fetchPendingApprovals(token, caseId)
+      .then((items) => alive && setApprovals(items))
+      .catch(() => alive && setApprovals([]))
+      .finally(() => alive && setLoading(false))
+    return () => {
+      alive = false
+    }
+  }, [token, caseId, dataTick])
+
+  usePolling(
+    () => {
+      if (token && caseId) {
+        void fetchPendingApprovals(token, caseId).then(setApprovals).catch(() => {})
+      }
+    },
+    approvals.length > 0,
+    5000,
+  )
+
+  const handleConfirm = async (a: PendingApproval) => {
+    try {
+      const result = await apiConfirmApproval(token, a.id)
+      setApprovals((prev) => prev.filter((x) => x.id !== a.id))
+      ok(result.summary ?? '已执行')
+      bump()
+      onConfirm({
+        id: a.id,
+        title: a.tool,
+        summary: a.tool,
+        level: 'write',
+        execute: async () => {},
+      })
+    } catch (e) {
+      error(e instanceof Error ? e.message : '执行失败')
+    }
+  }
+
+  const handleReject = async (a: PendingApproval) => {
+    try {
+      await apiRejectApproval(token, a.id)
+      setApprovals((prev) => prev.filter((x) => x.id !== a.id))
+      ok('已取消')
+      bump()
+      onReject({
+        id: a.id,
+        title: a.tool,
+        summary: a.tool,
+        level: 'write',
+        execute: async () => {},
+      })
+    } catch (e) {
+      error(e instanceof Error ? e.message : '取消失败')
+    }
+  }
 
   return (
     <aside className="flex w-[21rem] shrink-0 flex-col border-l border-white/10 bg-stone-950/70">
@@ -46,14 +124,16 @@ export function ContextPanel({
           </h2>
         </div>
 
-        {approvals.length === 0 ? (
+        {loading && approvals.length === 0 ? (
+          <p className="px-4 pb-3 text-xs text-stone-600">加载中…</p>
+        ) : approvals.length === 0 ? (
           <p className="px-4 pb-3 text-xs leading-5 text-stone-600">
-            写操作（新建、修改、删除、导出）都会先出现在这里，确认后才真正执行。
+            写操作（新建、修改、删除、导出）会先出现在这里，确认后才真正执行。
           </p>
         ) : (
           <div className="flex max-h-72 flex-col gap-2 overflow-y-auto px-3 pb-3">
             {approvals.map((a) => (
-              <ApprovalRow key={a.id} approval={a} onConfirm={onConfirm} onReject={onReject} />
+              <ServerApprovalRow key={a.id} approval={a} onConfirm={handleConfirm} onReject={handleReject} />
             ))}
           </div>
         )}
@@ -76,16 +156,18 @@ export function ContextPanel({
   )
 }
 
-function ApprovalRow({
+function ServerApprovalRow({
   approval,
   onConfirm,
   onReject,
 }: {
-  approval: ApprovalItem
-  onConfirm: (a: ApprovalItem) => void
-  onReject: (a: ApprovalItem) => void
+  approval: PendingApproval
+  onConfirm: (a: PendingApproval) => void
+  onReject: (a: PendingApproval) => void
 }) {
   const [busy, setBusy] = useState(false)
+  const input = (approval.input ?? {}) as Record<string, unknown>
+  const summary = String(input.title ?? input.keyword ?? JSON.stringify(input).slice(0, 60))
 
   const confirm = async () => {
     setBusy(true)
@@ -100,29 +182,29 @@ function ApprovalRow({
     <div
       className={clsx(
         'rounded-xl border p-3',
-        approval.level === 'destructive'
+        approval.danger_level === 'destructive'
           ? 'border-red-400/25 bg-red-950/20'
-          : approval.level === 'sensitive'
+          : approval.danger_level === 'sensitive'
             ? 'border-amber-300/30 bg-amber-950/20'
             : 'border-white/10 bg-white/4',
       )}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-stone-100">{approval.title}</p>
-          <p className="mt-0.5 line-clamp-2 text-xs text-stone-400">{approval.summary}</p>
+          <p className="truncate text-sm font-medium text-stone-100">{approval.tool}</p>
+          <p className="mt-0.5 line-clamp-2 text-xs text-stone-400">{summary}</p>
         </div>
         <span
           className={clsx(
             'shrink-0 rounded-full border px-1.5 py-0.5 text-[0.6rem] uppercase',
-            approval.level === 'destructive'
+            approval.danger_level === 'destructive'
               ? 'border-red-400/30 text-red-200'
-              : approval.level === 'sensitive'
+              : approval.danger_level === 'sensitive'
                 ? 'border-amber-300/30 text-amber-200'
                 : 'border-emerald-400/25 text-emerald-200',
           )}
         >
-          {approval.level === 'destructive' ? 'destructive' : approval.level === 'sensitive' ? 'sensitive' : 'write'}
+          {approval.danger_level}
         </span>
       </div>
       <div className="mt-2.5 flex gap-2">
@@ -135,7 +217,7 @@ function ApprovalRow({
           确认执行
         </button>
         <button
-          onClick={() => onReject(approval)}
+          onClick={() => void onReject(approval)}
           disabled={busy}
           className="flex items-center gap-1 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-stone-400 transition hover:border-white/25 hover:text-stone-200 disabled:opacity-50"
         >
@@ -146,6 +228,7 @@ function ApprovalRow({
     </div>
   )
 }
+
 
 // ---------- Selection detail ----------
 

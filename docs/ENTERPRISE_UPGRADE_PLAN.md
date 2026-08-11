@@ -1,7 +1,7 @@
 # LegalGenie Agent 企业级升级规划
 
 Last updated: 2026-08-10
-状态：**Phase 0 + P1 完成（2026-08-10）**：P1a PostgreSQL 迁移、P1b 可靠任务执行均已交付；P2 Agent 运行时待启动
+状态：**Phase 0 + P1 + P2 完成（2026-08-10）**：PostgreSQL 迁移、可靠任务执行、服务端 Agent 运行时均已交付；P3 企业存储与扩展 / P4 可观测合规待启动
 范围：后端（`server/`）为主，前端仅在 Phase 2 涉及流式消费改造
 
 ---
@@ -147,20 +147,21 @@ LegalGenie Agent 当前成熟度为 **L4（Deliverable）**：单实例可交付
 
 **目标**：把"对话驱动工作台"从前端规则升级为服务端 Agent 运行时，审批持久化可审计。
 
-- [ ] P2-1 会话模型
-  - `agent_sessions(id, case_id, user_id, title, status, created_at, updated_at)` + `agent_messages(id, session_id, role, content, created_at)` + `agent_tool_calls(id, session_id, tool_name, input, output, status, error, created_at)`
-- [ ] P2-2 工具注册表
-  - 统一 `Tool` trait：`name / description / input_schema(JSON Schema) / required_role / execute`
-  - 首批工具：list/create/move node、list/upload/parse file、list person/dedupe/merge、search、export、approve/reject
-  - 每个工具声明 `danger_level`（read / write / sensitive / destructive）→ 驱动审批策略
-- [ ] P2-3 审批持久化
-  - `approval_requests(id, session_id, tool_call_id, case_id, requested_by, decision(ask|confirmed|rejected|expired), decided_by, decided_at, expires_at)`
-  - 端点：`POST /api/v1/agent/sessions/:id/run`（非流式一次性执行，兼容旧前端）；`GET /api/v1/agent/sessions/:id/events`（SSE 步进流）
-  - 服务端强制：工具执行前检查审批状态（**前端审批升级为服务端策略**）
-- [ ] P2-4 Provider 抽象（复用翻译 provider 模式）
-  - `ChatProvider` trait（OpenAI 兼容 chat completions）；本地规则引擎作为默认 provider（与现前端行为一致，保证无 LLM 环境可用）
-- [ ] P2-5 前端改造
-  - ChatView 改为消费 SSE；审批队列改为从 `approval_requests` 拉取/推送；消息历史改存服务端（会话可恢复）
+- [x] P2-1 会话模型（migration 0018）
+  - `agent_sessions` + `agent_messages` + `agent_tool_calls`（含 requires_approval / danger_level / decided_by / decided_at）
+- [x] P2-2 工具注册表（`server/src/agent/tools.rs`）
+  - `Tool` trait：name / description / input_schema / danger_level / execute；`ToolContext` 注入 state + user + case
+  - 首批 13 个工具：list_nodes / list_files / list_persons / dedupe_persons / search（读）；create_node / move_node / parse_file / create_person / export_evidence_list（写）；merge_persons（敏感）；delete_node（破坏）
+  - 工具执行内强制 `ensure_case_write_access`（viewer 写操作服务端拒绝）
+- [x] P2-3 审批持久化（服务端强制）
+  - 写工具经统一管道创建 `pending` 工具调用（不执行）；`GET /agent/approvals/pending?case_id=` 拉取；`POST /agent/approvals/:id/confirm|reject` 决策
+  - 审批按 requested_by 归属 + 案件访问控制双重校验；确认后才执行并写回 output，决策全程落库可审计
+- [x] P2-4 执行引擎（`server/src/agent/engine.rs`）
+  - 规则引擎默认：中文/英文/斜杠命令意图解析 → 工具管道；读立即执行、写进审批
+  - LLM 意图识别为后续可插拔项（管道与工具执行解耦）
+- [x] P2-5 前端适配
+  - ChatView 改消费服务端会话（会话自动创建/复用、消息服务端持久化）；ContextPanel 审批队列改为服务端轮询 + 确认/拒绝直调 API
+- 端点：`POST/GET /agent/sessions`、`GET/DELETE /agent/sessions/:id`、`POST/GET /agent/sessions/:id/messages`、`GET /agent/approvals/pending`、`POST /agent/approvals/:id/confirm|reject`
 
 **验证**：端到端用例：自然语言 → 工具调用 → 审批 → 执行 → 审计回放（oplog 记录 approve/reject/execute 全链）。
 

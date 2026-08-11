@@ -10,7 +10,17 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { Bot, LogOut, Scale, UserRound } from 'lucide-react'
 import { useAuth } from '../App'
-import { fetchCases, fetchMyRole, logout, uploadFile as apiUploadFile } from '../lib/api'
+import {
+  fetchCases,
+  fetchMyRole,
+  logout,
+  uploadFile as apiUploadFile,
+  fetchAgentSessions,
+  createAgentSession,
+  fetchAgentSession,
+  postAgentMessage,
+  type AgentMessage,
+} from '../lib/api'
 import { useToasts, type Toast } from '../lib/hooks'
 import type { ApprovalItem, ChatMessage } from '../lib/agent'
 import type {
@@ -99,6 +109,8 @@ function WorkbenchInner({ token }: { token: string }) {
   const [approvals, setApprovals] = useState<ApprovalItem[]>([])
   const [dataTick, setDataTick] = useState(0)
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null)
+  const [agentSessionId, setAgentSessionId] = useState<string | null>(null)
+  const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const bump = useCallback(() => setDataTick((t) => t + 1), [])
@@ -150,25 +162,75 @@ function WorkbenchInner({ token }: { token: string }) {
     }
   }, [caseId, token])
 
-  // ---------- Per-case chat history (session-scoped) ----------
+  // ---------- Agent session (server-backed, P2) ----------
   useEffect(() => {
-    if (!caseId) {
-      setMessages([])
-      setApprovals([])
+    if (!caseId || !token) {
+      setAgentSessionId(null)
+      setAgentMessages([])
+      setSelection(null)
       return
     }
-    const key = `legalgenie-agent/chat/${caseId}`
-    try {
-      const raw = window.sessionStorage.getItem(key)
-      const parsed = raw ? (JSON.parse(raw) as ChatMessage[]) : []
-      // Approvals are not serializable (functions); restore text trail only.
-      setMessages(parsed.map((m) => ({ ...m, approvals: [] })))
-    } catch {
-      setMessages([])
-    }
-    setApprovals([])
+    let alive = true
+    fetchAgentSessions(token)
+      .then(async (sessions) => {
+        if (!alive) return
+        const existing = sessions.find((s) => s.case_id === caseId)
+        if (existing) {
+          setAgentSessionId(existing.id)
+          const detail = await fetchAgentSession(token, existing.id)
+          if (alive) setAgentMessages(detail.messages)
+        } else {
+          const created = await createAgentSession(token, caseId)
+          if (alive) {
+            setAgentSessionId(created.id)
+            setAgentMessages([])
+          }
+        }
+      })
+      .catch(() => {
+        if (alive) setAgentSessionId(null)
+      })
     setSelection(null)
-  }, [caseId])
+    return () => {
+      alive = false
+    }
+  }, [caseId, token])
+
+  const sendAgentMessage = useCallback(
+    async (text: string) => {
+      if (!agentSessionId) return
+      const optimistic: AgentMessage = {
+        id: `local-${Date.now()}`,
+        role: 'user',
+        content: text,
+        created_at: new Date().toISOString(),
+      }
+      setAgentMessages((prev) => [...prev, optimistic])
+      try {
+        const run = await postAgentMessage(token, agentSessionId, text)
+        setAgentMessages((prev) => [
+          ...prev.filter((m) => m.id !== optimistic.id),
+          {
+            id: `user-${run.session.updated_at}`,
+            role: 'user',
+            content: text,
+            created_at: run.session.updated_at,
+          },
+          {
+            id: `assistant-${Date.now()}`,
+            role: 'assistant',
+            content: run.assistant_text,
+            created_at: run.session.updated_at,
+          },
+        ])
+        bump()
+      } catch (e) {
+        error(e instanceof Error ? e.message : '发送失败')
+        setAgentMessages((prev) => prev.filter((m) => m.id !== optimistic.id))
+      }
+    },
+    [agentSessionId, token, bump, error],
+  )
 
   const persistMessages = useCallback(
     (next: ChatMessage[]) => {
@@ -385,12 +447,7 @@ function WorkbenchInner({ token }: { token: string }) {
           {/* Main view */}
           <main className="min-w-0 flex-1 overflow-hidden">
             {view === 'chat' && (
-              <ChatView
-                messages={messages}
-                appendMessage={appendMessage}
-                approvals={approvals}
-                setApprovals={setApprovals}
-              />
+              <ChatView messages={agentMessages} onSend={sendAgentMessage} />
             )}
             {view === 'timeline' && <TimelineView />}
             {view === 'evidence' && <EvidenceView />}
@@ -401,11 +458,7 @@ function WorkbenchInner({ token }: { token: string }) {
           </main>
 
           {/* Right context panel */}
-          <ContextPanel
-            approvals={approvals}
-            onConfirm={confirmApproval}
-            onReject={rejectApproval}
-          />
+          <ContextPanel onConfirm={confirmApproval} onReject={rejectApproval} />
         </div>
 
         <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChosen} />

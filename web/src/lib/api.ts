@@ -663,3 +663,128 @@ export async function exportLogs(
 
 export type { Session } from './types'
 export { API_BASE_URL }
+
+// ---------- Agent runtime (P2) ----------
+
+export type AgentSession = {
+  id: string
+  case_id: string | null
+  title: string
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export type AgentMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
+export type AgentToolCall = {
+  id: string
+  tool: string
+  input: Record<string, unknown>
+  output?: unknown
+  status: 'pending' | 'approved' | 'rejected' | 'executed' | 'failed'
+  requires_approval: boolean
+  danger_level: string
+  error?: string | null
+}
+
+export type AgentRun = {
+  session: AgentSession
+  assistant_text: string
+  tool_calls: AgentToolCall[]
+  pending_approvals: Array<{
+    id: string
+    tool: string
+    danger_level: string
+    input: Record<string, unknown>
+  }>
+}
+
+export type AgentSessionDetail = {
+  session: AgentSession
+  messages: AgentMessage[]
+  tool_calls: AgentToolCall[]
+}
+
+export type PendingApproval = {
+  id: string
+  tool: string
+  input: Record<string, unknown>
+  danger_level: string
+  session_id: string
+  case_id: string
+}
+
+export async function createAgentSession(
+  token: string,
+  caseId: string,
+): Promise<AgentSession> {
+  return request<AgentSession>(
+    '/agent/sessions',
+    { method: 'POST', body: JSON.stringify({ case_id: caseId }) },
+    token,
+  )
+}
+
+export async function fetchAgentSessions(token: string): Promise<AgentSession[]> {
+  return request<AgentSession[]>('/agent/sessions', undefined, token)
+}
+
+export async function fetchAgentSession(
+  token: string,
+  sessionId: string,
+): Promise<AgentSessionDetail> {
+  return request<AgentSessionDetail>(`/agent/sessions/${sessionId}`, undefined, token)
+}
+
+export async function postAgentMessage(
+  token: string,
+  sessionId: string,
+  content: string,
+): Promise<AgentRun> {
+  return request<AgentRun>(
+    `/agent/sessions/${sessionId}/messages`,
+    { method: 'POST', body: JSON.stringify({ content }) },
+    token,
+  )
+}
+
+export async function fetchPendingApprovals(
+  token: string,
+  caseId?: string,
+): Promise<PendingApproval[]> {
+  const q = caseId ? `?case_id=${caseId}` : ''
+  const data = await request<{ approvals: PendingApproval[] }>(
+    `/agent/approvals/pending${q}`,
+    undefined,
+    token,
+  )
+  return data.approvals
+}
+
+export async function confirmApproval(
+  token: string,
+  approvalId: string,
+): Promise<{ status: string; summary?: string }> {
+  return request<{ status: string; summary?: string }>(
+    `/agent/approvals/${approvalId}/confirm`,
+    { method: 'POST', body: '{}' },
+    token,
+  )
+}
+
+export async function rejectApproval(
+  token: string,
+  approvalId: string,
+): Promise<{ status: string }> {
+  return request<{ status: string }>(
+    `/agent/approvals/${approvalId}/reject`,
+    { method: 'POST', body: '{}' },
+    token,
+  )
+}

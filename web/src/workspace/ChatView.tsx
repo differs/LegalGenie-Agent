@@ -11,8 +11,7 @@ import {
   Users,
 } from 'lucide-react'
 import { useWorkspace } from './Workbench'
-import { handleUserInput, buildApprovalForIntent, type ApprovalItem, type ChatMessage } from '../lib/agent'
-import { AgentCardView } from './cards'
+import type { AgentMessage } from '../lib/api'
 
 const SUGGESTIONS: ReadonlyArray<{ label: string; prompt: string; icon: typeof History }> = [
   { label: '列出时间轴节点', prompt: '列出这个案件的时间轴节点', icon: History },
@@ -23,16 +22,12 @@ const SUGGESTIONS: ReadonlyArray<{ label: string; prompt: string; icon: typeof H
 
 export function ChatView({
   messages,
-  appendMessage,
-  approvals,
-  setApprovals,
+  onSend,
 }: {
-  messages: ChatMessage[]
-  appendMessage: (m: ChatMessage) => void
-  approvals: ApprovalItem[]
-  setApprovals: (items: ApprovalItem[]) => void
+  messages: AgentMessage[]
+  onSend: (text: string) => Promise<void>
 }) {
-  const { token, caseId, caseName, isReadOnly, onNeedCase, onUploadRequested } = useWorkspace()
+  const { isReadOnly, onUploadRequested } = useWorkspace()
   const [draft, setDraft] = useState('')
   const [thinking, setThinking] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -44,51 +39,10 @@ export function ChatView({
   const send = async (raw: string) => {
     const text = raw.trim()
     if (!text || thinking) return
-    if (!caseId) {
-      onNeedCase()
-      return
-    }
-
-    appendMessage({ role: 'user', text, at: Date.now() })
     setDraft('')
     setThinking(true)
-
     try {
-      const output = await handleUserInput(text, {
-        token,
-        caseId: caseId ?? undefined,
-        caseName: caseName ?? undefined,
-        isReadOnly,
-        onNeedCase,
-        onUploadRequested,
-      }, (intent) => buildApprovalForIntent(intent, { token, caseId: caseId ?? undefined, caseName: caseName ?? undefined, isReadOnly, onNeedCase, onUploadRequested }))
-
-      const newApprovals = output.approvals
-      if (newApprovals.length > 0) {
-        setApprovals([...approvals, ...newApprovals])
-      }
-
-      appendMessage({
-        role: 'agent',
-        text: output.text,
-        cards: output.cards,
-        approvals: newApprovals,
-        options: output.options,
-        at: Date.now(),
-      })
-    } catch (e) {
-      appendMessage({
-        role: 'agent',
-        text: '',
-        cards: [
-          {
-            kind: 'error',
-            text: `执行失败：${e instanceof Error ? e.message : String(e)}`,
-          },
-        ],
-        approvals: [],
-        at: Date.now(),
-      })
+      await onSend(text)
     } finally {
       setThinking(false)
     }
@@ -102,12 +56,8 @@ export function ChatView({
           <EmptyState onPick={(p) => void send(p)} onUpload={onUploadRequested} readOnly={isReadOnly} />
         ) : (
           <div className="mx-auto flex max-w-3xl flex-col gap-4">
-            {messages.map((m, i) => (
-              <MessageBubble
-                key={i}
-                message={m}
-                addApprovals={(items) => setApprovals([...approvals, ...items])}
-              />
+            {messages.map((m) => (
+              <MessageBubble key={m.id} message={m} />
             ))}
             {thinking && (
               <div className="flex items-center gap-2 text-sm text-stone-500">
@@ -152,9 +102,9 @@ function EmptyState({
           {caseName ? `案件「${caseName}」` : 'LegalGenie Agent'}
         </h2>
         <p className="mt-2 text-sm leading-6 text-stone-400">
-          用自然语言指挥 Agent 处理时间轴、证据、人物与导出。
+          对话由服务端 Agent 处理，写操作会先进入右侧「待确认动作」。
           <br />
-          所有写操作都会先进入右侧「待确认动作」，确认后才真正执行。
+          会话与审批记录持久化，可审计回放。
         </p>
       </div>
 
@@ -187,18 +137,12 @@ function EmptyState({
   )
 }
 
-function MessageBubble({
-  message,
-  addApprovals,
-}: {
-  message: ChatMessage
-  addApprovals: (items: ApprovalItem[]) => void
-}) {
+function MessageBubble({ message }: { message: AgentMessage }) {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
         <div className="max-w-[80%] rounded-2xl rounded-br-md bg-amber-300/95 px-4 py-2.5 text-sm leading-6 text-stone-950">
-          {message.text}
+          {message.content}
         </div>
       </div>
     )
@@ -212,12 +156,7 @@ function MessageBubble({
         </span>
         Agent
       </div>
-      {message.text && (
-        <div className="whitespace-pre-line text-sm leading-6 text-stone-200">{message.text}</div>
-      )}
-      {message.cards.map((card, i) => (
-        <AgentCardView key={i} card={card} addApprovals={addApprovals} />
-      ))}
+      <div className="whitespace-pre-line text-sm leading-6 text-stone-200">{message.content}</div>
     </div>
   )
 }
@@ -268,7 +207,7 @@ function Composer({
             className="w-full bg-transparent text-sm text-stone-100 outline-none placeholder:text-stone-600"
           />
           <p className="mt-0.5 hidden text-[0.65rem] text-stone-700 sm:block">
-            支持：列出节点/证据/人物 · 搜索 · 人物去重 · 新建节点（标题+日期）· 导出报告
+            支持：列出节点/证据/人物 · 搜索 · 人物去重 · 新建节点（标题+日期）· 导出
           </p>
         </div>
         <button
