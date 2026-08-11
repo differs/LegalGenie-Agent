@@ -215,7 +215,7 @@ async fn export_evidence_list(
     Path(case_id): Path<String>,
 ) -> AppResult<Response> {
     let case_id = normalize_uuid(&case_id, "invalid case_id")?;
-    ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+    crate::access::ensure_operation(&state.pool, user.user_id, &case_id, "case:export").await?;
 
     let rows: Vec<EvidenceExportRow> = sqlx::query_as(
         r#"
@@ -326,7 +326,7 @@ async fn export_evidence_list(
         chrono::Utc::now().format("%Y%m%d_%H%M%S")
     );
     let storage_path = format!("exports/{}/{}", case_id, file_name);
-    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+    let full_path = state.store.full_path(&storage_path);
 
     if let Some(parent) = full_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -437,7 +437,7 @@ async fn download_export(
         return Err(AppError::not_found("export not found"));
     };
 
-    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+    let full_path = state.store.full_path(&storage_path);
     let file = tokio::fs::File::open(&full_path)
         .await
         .map_err(|_| AppError::not_found("export not found"))?;
@@ -506,7 +506,7 @@ async fn export_timeline(
     Query(q): Query<TimelineExportQuery>,
 ) -> AppResult<Response> {
     let case_id = normalize_uuid(&case_id, "invalid case_id")?;
-    ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+    crate::access::ensure_operation(&state.pool, user.user_id, &case_id, "case:export").await?;
 
     let fmt = q
         .format
@@ -598,7 +598,7 @@ async fn export_timeline(
         chrono::Utc::now().format("%Y%m%d_%H%M%S")
     );
     let storage_path = format!("exports/{}/{}", case_id, file_name);
-    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+    let full_path = state.store.full_path(&storage_path);
 
     if let Some(parent) = full_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -695,7 +695,7 @@ async fn export_timeline_report(
     Query(q): Query<TimelineReportQuery>,
 ) -> AppResult<Response> {
     let case_id = normalize_uuid(&case_id, "invalid case_id")?;
-    ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+    crate::access::ensure_operation(&state.pool, user.user_id, &case_id, "case:export").await?;
 
     let fmt = q
         .format
@@ -855,7 +855,7 @@ async fn export_timeline_report(
         file_ext
     );
     let storage_path = format!("exports/{}/{}", case_id, file_name);
-    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+    let full_path = state.store.full_path(&storage_path);
 
     if let Some(parent) = full_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -1460,7 +1460,7 @@ pub(crate) async fn agent_export_evidence_list(
         chrono::Utc::now().format("%Y%m%d_%H%M%S")
     );
     let storage_path = format!("exports/{}/{}", case_id, file_name);
-    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+    let full_path = state.store.full_path(&storage_path);
     if let Some(parent) = full_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }

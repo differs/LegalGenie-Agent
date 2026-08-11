@@ -11,9 +11,10 @@ pub mod job_worker;
 pub mod jobs;
 mod oplog;
 pub mod parser;
-mod rate_limit;
+pub mod rate_limit;
 mod routes;
 mod state;
+pub mod store;
 pub mod translation;
 
 pub use crate::config::{AppConfig, AppEnv, CorsOrigins, TranslationConfig};

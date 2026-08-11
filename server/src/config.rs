@@ -38,6 +38,9 @@ pub struct AppConfig {
     pub whisper_model_path: String,
     pub asr_language: String,
     pub asr_threads: u16,
+    /// Approval policy for agent write tools: `ask` (default, human
+    /// confirmation required) or `auto` (execute immediately; dangerous).
+    pub approval_policy: String,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +151,7 @@ impl AppConfig {
             env_string("WHISPER_MODEL_PATH", "./data/models/whisper/ggml-tiny.bin");
         let asr_language = env_string("ASR_LANGUAGE", "zh");
         let asr_threads = env_u16("ASR_THREADS", default_asr_threads())?;
+        let approval_policy = env_string("APPROVAL_POLICY", "ask");
 
         let cors_origins = match std::env::var("CORS_ORIGINS") {
             Ok(v) => parse_cors_origins(&v),
@@ -174,6 +178,7 @@ impl AppConfig {
             whisper_model_path,
             asr_language,
             asr_threads,
+            approval_policy,
         };
 
         cfg.validate()?;
@@ -199,6 +204,10 @@ impl AppConfig {
 
             if !self.force_https {
                 anyhow::bail!("FORCE_HTTPS must be enabled in production");
+            }
+
+            if !matches!(self.approval_policy.as_str(), "ask" | "auto") {
+                anyhow::bail!("APPROVAL_POLICY must be 'ask' or 'auto'");
             }
 
             if let Some(old) = self.jwt_secret_old.as_deref() {

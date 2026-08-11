@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
@@ -219,7 +219,7 @@ async fn upload_case_file(
 
     let stored_name = generate_stored_name(&original_name);
     let storage_path = format!("files/{}/{}", case_id, stored_name);
-    let full_path = PathBuf::from(&state.config.storage_path).join(&storage_path);
+    let full_path = state.store.full_path(&storage_path);
 
     if let Some(parent) = full_path.parent() {
         tokio::fs::create_dir_all(parent)

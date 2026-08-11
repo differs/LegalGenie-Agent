@@ -2014,7 +2014,6 @@ async fn build_test_app_with_fake_translation() -> (
     .await
 }
 
-
 /// Fake-translation builder WITHOUT background job workers: translation runs
 /// only when the test drives it explicitly (run_translate_job /
 /// run_retry_cycle_once), giving timing-sensitive tests exclusive control.
@@ -2106,6 +2105,7 @@ async fn build_test_app_with_named_translation(
         whisper_model_path: tmp.path().join("whisper.bin").to_string_lossy().to_string(),
         asr_language: "zh".to_string(),
         asr_threads: 1,
+        approval_policy: "ask".to_string(),
     };
 
     let state =

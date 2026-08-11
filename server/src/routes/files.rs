@@ -386,7 +386,7 @@ async fn download_parsed(
     let row = fetch_file_row(&state, &user, &id, false).await?;
 
     let parsed_rel = format!("parsed/{}/{}.json", row.case_id, row.id);
-    let full_path = PathBuf::from(&state.config.storage_path).join(&parsed_rel);
+    let full_path = state.store.full_path(&parsed_rel);
     let file = tokio::fs::File::open(&full_path)
         .await
         .map_err(|_| AppError::not_found_code(420101, "parsed result not found"))?;

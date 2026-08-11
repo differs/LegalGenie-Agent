@@ -80,6 +80,18 @@ async fn main() -> anyhow::Result<()> {
     );
 
     translation::start_retry_poller_once(state.clone());
+
+    // WORKER_ONLY=1: dedicated worker process without the HTTP server
+    // (docker-compose `worker` service / k8s deployment pattern).
+    if std::env::var("WORKER_ONLY").ok().as_deref() == Some("1") {
+        tracing::info!(worker_count, "worker-only mode; no HTTP server");
+        shutdown.cancelled().await;
+        tracing::info!("worker-only shutdown; waiting for in-flight jobs…");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(60), workers).await;
+        tracing::info!("worker-only shutdown complete");
+        return Ok(());
+    }
+
     let app = router(state.clone());
 
     let addr = state.config.bind_addr();

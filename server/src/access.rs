@@ -101,3 +101,58 @@ pub async fn ensure_case_owner(pool: &PgPool, user_id: Uuid, case_id: &str) -> A
         Err(AppError::forbidden_code(410102, "only owner allowed"))
     }
 }
+
+/// Matrix-backed operation check (P3): owner passes everything; members and
+/// viewers are checked against the `permissions` table. Unknown operations
+/// default to deny.
+pub async fn ensure_operation(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    case_id: &str,
+    operation: &str,
+) -> AppResult<()> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT owner_id, status FROM cases WHERE id = $1 LIMIT 1")
+            .bind(case_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    let Some((owner_id, status)) = row else {
+        return Err(AppError::not_found_code(410101, "case not found"));
+    };
+    if status == "deleted" {
+        return Err(AppError::not_found_code(410101, "case not found"));
+    }
+    if owner_id == user_id.to_string() {
+        return Ok(());
+    }
+
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role_in_case FROM case_members WHERE case_id = $1 AND user_id = $2 LIMIT 1",
+    )
+    .bind(case_id)
+    .bind(user_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    let Some(role) = role else {
+        return Err(AppError::forbidden_code(410102, "no case access"));
+    };
+
+    let allowed: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1::bigint FROM permissions WHERE role = $1 AND operation = $2 LIMIT 1",
+    )
+    .bind(&role)
+    .bind(operation)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    if allowed.is_some() {
+        Ok(())
+    } else {
+        Err(AppError::forbidden_code(410102, "operation not permitted"))
+    }
+}

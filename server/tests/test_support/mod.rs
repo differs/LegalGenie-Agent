@@ -178,6 +178,7 @@ pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, PgPool) {
         whisper_model_path: tmp.path().join("whisper.bin").to_string_lossy().to_string(),
         asr_language: "zh".to_string(),
         asr_threads: 1,
+        approval_policy: "ask".to_string(),
     };
 
     let state = AppState::new(cfg, pool);

@@ -15,6 +15,35 @@ services:
       timeout: 3s
       retries: 10
 
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: "${APP_ENV:-development}"
+      FORCE_HTTPS: "${FORCE_HTTPS:-false}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      JWT_SECRET: "${JWT_SECRET:-change-me-to-a-long-random-secret}"
+      MAX_FILE_SIZE: "${MAX_FILE_SIZE:-104857600}"
+      ALLOWED_FILE_TYPES: "${ALLOWED_FILE_TYPES:-pdf,doc,docx,xls,xlsx,jpg,jpeg,png,mp3,wav,txt,json}"
+      ASR_LANGUAGE: "${ASR_LANGUAGE:-zh}"
+      ASR_THREADS: "${ASR_THREADS:-4}"
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8000"
+      DATABASE_URL: "postgres://${PG_USER:-legalgenie}:${PG_PASSWORD:-legalgenie_dev}@postgres:5432/${PG_DB:-legalgenie}"
+      STORAGE_PATH: "./storage"
+      TEMP_PATH: "./storage/temp"
+      TESSDATA_DIR: "./data/tessdata"
+      WHISPER_MODEL_PATH: "./data/models/whisper/ggml-tiny.bin"
+      WORKER_ONLY: "1"
+      JOB_WORKERS: "${JOB_WORKERS:-4}"
+    volumes:
+      - ./storage:/app/storage
+    restart: unless-stopped
+
   server:
     build:
       context: .

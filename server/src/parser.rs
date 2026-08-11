@@ -263,7 +263,7 @@ async fn parse_and_update(state: &AppState, file_id: &str) -> anyhow::Result<()>
         return Ok(());
     };
 
-    let full_path = PathBuf::from(&state.config.storage_path).join(&row.storage_path);
+    let full_path = state.store.full_path(&row.storage_path);
     let kind = detect_kind(&row.original_name, &row.file_type);
 
     let mut out = match kind {
@@ -285,7 +285,7 @@ async fn parse_and_update(state: &AppState, file_id: &str) -> anyhow::Result<()>
 
     // Guard runaway output (and keep json/db consistent).
     out.parsed_text = truncate_string(&out.parsed_text, 50_000_000);
-    let artifact_path = write_parsed_artifact(&state.config, &row, kind, &out).await?;
+    let artifact_path = write_parsed_artifact(state, &row, kind, &out).await?;
 
     let chunks = derive_chunks(kind, &out, translation_chunk_size_limit());
     match persist_chunks_and_mark_done(&state.pool, &row, out, chunks).await {
@@ -1062,13 +1062,13 @@ async fn parse_doc(_path: &Path) -> anyhow::Result<ParseOutput> {
 }
 
 async fn write_parsed_artifact(
-    config: &AppConfig,
+    state: &AppState,
     row: &EvidenceFileToParse,
     kind: FileKind,
     out: &ParseOutput,
 ) -> anyhow::Result<PathBuf> {
     let rel = format!("parsed/{}/{}.json", row.case_id, row.id);
-    let full_path = PathBuf::from(&config.storage_path).join(&rel);
+    let full_path = state.store.full_path(&rel);
 
     if let Some(parent) = full_path.parent() {
         tokio::fs::create_dir_all(parent)

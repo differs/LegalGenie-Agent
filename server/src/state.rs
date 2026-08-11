@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, TranslationConfig};
 use crate::rate_limit::RateLimiter;
+use crate::store::{LocalObjectStore, ObjectStore};
 use crate::translation::{self, TranslationProvider};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ pub struct AppState {
     pub translation_provider: Arc<dyn TranslationProvider>,
     pub pool: PgPool,
     pub rate_limiter: Arc<RateLimiter>,
+    pub store: Arc<dyn ObjectStore>,
 }
 
 impl AppState {
@@ -47,12 +49,16 @@ impl AppState {
         translation: TranslationConfig,
         translation_provider: Arc<dyn TranslationProvider>,
     ) -> Self {
+        let limiter = Arc::new(RateLimiter::new(pool.clone()));
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalObjectStore::new(config.storage_path.clone()));
         Self {
             config,
             translation,
             translation_provider,
             pool,
-            rate_limiter: Arc::new(RateLimiter::new()),
+            rate_limiter: limiter,
+            store,
         }
     }
 }

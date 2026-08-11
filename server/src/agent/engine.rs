@@ -327,8 +327,9 @@ async fn run_tool(
 
     let tool_call_id = Uuid::new_v4().to_string();
     let danger = tool.danger_level();
+    let policy_auto = ctx.state.config.approval_policy == "auto";
 
-    if !danger.requires_approval() {
+    if !danger.requires_approval() || policy_auto {
         // Read tool: execute immediately.
         match tool.execute(ctx, input.clone()).await {
             Ok(output) => {
@@ -554,4 +555,3 @@ fn help_text() -> String {
     ]
     .join("\n")
 }
-

@@ -112,7 +112,6 @@ pub fn find_tool(name: &str) -> Option<Box<dyn Tool>> {
     all_tools().into_iter().find(|t| t.name() == name)
 }
 
-
 #[async_trait]
 impl Tool for ListNodesTool {
     fn name(&self) -> &'static str {
@@ -388,9 +387,14 @@ impl Tool for CreateNodeTool {
     async fn execute(&self, ctx: &ToolContext<'_>, input: Value) -> anyhow::Result<Value> {
         let case_id = require_case(ctx)?;
         ensure_case_access(ctx.state, ctx.user_id, &case_id).await?;
-        crate::access::ensure_case_write_access(&ctx.state.pool, uuid_from(ctx.user_id)?, &case_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::access::ensure_operation(
+            &ctx.state.pool,
+            uuid_from(ctx.user_id)?,
+            &case_id,
+            "case:write",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let title = input
             .get("title")
@@ -472,9 +476,14 @@ impl Tool for MoveNodeTool {
         let Some((case_id,)) = row else {
             anyhow::bail!("node not found");
         };
-        crate::access::ensure_case_write_access(&ctx.state.pool, uuid_from(ctx.user_id)?, &case_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::access::ensure_operation(
+            &ctx.state.pool,
+            uuid_from(ctx.user_id)?,
+            &case_id,
+            "case:write",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         sqlx::query(
             "UPDATE event_nodes SET event_time = $1, updated_at = utc_text() WHERE id = $2 AND status != 'deleted'",
@@ -516,9 +525,14 @@ impl Tool for DeleteNodeTool {
         let Some((case_id,)) = row else {
             anyhow::bail!("node not found");
         };
-        crate::access::ensure_case_write_access(&ctx.state.pool, uuid_from(ctx.user_id)?, &case_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::access::ensure_operation(
+            &ctx.state.pool,
+            uuid_from(ctx.user_id)?,
+            &case_id,
+            "case:write",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         sqlx::query(
             "UPDATE event_nodes SET status = 'deleted', updated_at = utc_text() WHERE id = $1 AND status != 'deleted'",
@@ -560,9 +574,14 @@ impl Tool for ParseFileTool {
         let Some((case_id,)) = row else {
             anyhow::bail!("file not found");
         };
-        crate::access::ensure_case_write_access(&ctx.state.pool, uuid_from(ctx.user_id)?, &case_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::access::ensure_operation(
+            &ctx.state.pool,
+            uuid_from(ctx.user_id)?,
+            &case_id,
+            "case:write",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         crate::parser::enqueue_parse(ctx.state.clone(), file_id.clone(), true).await?;
         Ok(json!({ "id": file_id, "parse_status": "processing" }))
@@ -586,9 +605,14 @@ impl Tool for CreatePersonTool {
     async fn execute(&self, ctx: &ToolContext<'_>, input: Value) -> anyhow::Result<Value> {
         let case_id = require_case(ctx)?;
         ensure_case_access(ctx.state, ctx.user_id, &case_id).await?;
-        crate::access::ensure_case_write_access(&ctx.state.pool, uuid_from(ctx.user_id)?, &case_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::access::ensure_operation(
+            &ctx.state.pool,
+            uuid_from(ctx.user_id)?,
+            &case_id,
+            "case:write",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let name = input
             .get("name")
@@ -647,9 +671,14 @@ impl Tool for MergePersonsTool {
     async fn execute(&self, ctx: &ToolContext<'_>, input: Value) -> anyhow::Result<Value> {
         let case_id = require_case(ctx)?;
         ensure_case_access(ctx.state, ctx.user_id, &case_id).await?;
-        crate::access::ensure_case_write_access(&ctx.state.pool, uuid_from(ctx.user_id)?, &case_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::access::ensure_operation(
+            &ctx.state.pool,
+            uuid_from(ctx.user_id)?,
+            &case_id,
+            "case:write",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let source = input
             .get("source_person_id")
@@ -724,9 +753,14 @@ impl Tool for ExportEvidenceListTool {
     async fn execute(&self, ctx: &ToolContext<'_>, _input: Value) -> anyhow::Result<Value> {
         let case_id = require_case(ctx)?;
         ensure_case_access(ctx.state, ctx.user_id, &case_id).await?;
-        crate::access::ensure_case_write_access(&ctx.state.pool, uuid_from(ctx.user_id)?, &case_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::access::ensure_operation(
+            &ctx.state.pool,
+            uuid_from(ctx.user_id)?,
+            &case_id,
+            "case:write",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let exported = crate::routes::case_exports::agent_export_evidence_list(
             ctx.state,
@@ -756,9 +790,14 @@ impl Tool for ExportTimelineReportTool {
     async fn execute(&self, ctx: &ToolContext<'_>, input: Value) -> anyhow::Result<Value> {
         let case_id = require_case(ctx)?;
         ensure_case_access(ctx.state, ctx.user_id, &case_id).await?;
-        crate::access::ensure_case_write_access(&ctx.state.pool, uuid_from(ctx.user_id)?, &case_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::access::ensure_operation(
+            &ctx.state.pool,
+            uuid_from(ctx.user_id)?,
+            &case_id,
+            "case:write",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let format = input
             .get("format")
