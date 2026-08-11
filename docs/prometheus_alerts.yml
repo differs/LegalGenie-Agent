@@ -1,0 +1,78 @@
+# LegalGenie Agent — Prometheus alerting rules (P4)
+# Drop into prometheus.yml: rule_files: [ "alerts.yml" ]
+groups:
+  - name: legalgenie-agent
+    rules:
+      - alert: ApiErrorRateHigh
+        expr: |
+          sum(rate(legalgenie_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(legalgenie_http_requests_total[5m])), 1)
+            > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API 5xx 错误率超过 5%（5 分钟窗口）"
+          description: "当前错误率 {{ $value | humanizePercentage }}"
+
+      - alert: JobQueueBacklog
+        expr: legalgenie_jobs_due_total > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "任务队列积压（due > 20）"
+          description: "待执行任务 {{ $value }} 个，持续 5 分钟——worker 可能不足或卡死"
+
+      - alert: DeadLetterJobs
+        expr: increase(legalgenie_jobs_dead_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "出现死信任务"
+          description: "15 分钟内有任务进入 dead 状态，需人工排查（查询 jobs 表 status='dead'）"
+
+      - alert: NoWorkersActive
+        expr: legalgenie_workers_active == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "无活跃 worker"
+          description: "所有 worker 停止领取任务超过 10 分钟，解析/翻译将停滞"
+
+      - alert: LeaseExpirySweeps
+        expr: increase(legalgenie_jobs_pending_total[15m]) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "大量任务被租约回收"
+          description: "15 分钟内有超过 50 个任务回到 pending——worker 频繁崩溃或租约过短"
+
+      - alert: InstanceDown
+        expr: up{job="legalgenie-agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "实例离线"
+          description: "{{ $labels.instance }} 无法抓取超过 1 分钟"
+
+  - name: legalgenie-postgres
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL 不可用"
+
+# Scrape config example (prometheus.yml):
+# scrape_configs:
+#   - job_name: legalgenie-agent
+#     metrics_path: /metrics
+#     static_configs:
+#       - targets: ["server:8000"]

@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(err) = legalminds_server::jobs::reset_stale_jobs(&state.pool).await {
         tracing::warn!(error = %err, "initial stale job sweep failed");
     }
+    spawn_log_retention(&state.pool.clone());
     let worker_count = std::env::var("JOB_WORKERS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -92,7 +93,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let app = router(state.clone());
+    let app = axum::Router::new()
+        .merge(router(state.clone()))
+        .merge(legalminds_server::metrics::metrics_router(state.clone()));
 
     let addr = state.config.bind_addr();
     tracing::info!(%addr, worker_count, "legalminds-server listening");
@@ -115,4 +118,34 @@ async fn main() -> anyhow::Result<()> {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(60), workers).await;
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+/// Best-effort audit log retention: purge at boot, then daily.
+fn spawn_log_retention(pool: &sqlx::PgPool) {
+    let retention_days = std::env::var("LOG_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90i64);
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        let purge = || async {
+            match sqlx::query_scalar::<_, i64>("SELECT purge_operation_logs($1)")
+                .bind(retention_days)
+                .fetch_one(&pool)
+                .await
+            {
+                Ok(removed) => {
+                    if removed > 0 {
+                        tracing::info!(removed, "purged old operation logs");
+                    }
+                }
+                Err(err) => tracing::warn!(error = %err, "log retention purge failed"),
+            }
+        };
+        purge().await;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+            purge().await;
+        }
+    });
 }

@@ -1,7 +1,7 @@
 # LegalGenie Agent 企业级升级规划
 
 Last updated: 2026-08-10
-状态：**Phase 0-3 完成（2026-08-11）**：PostgreSQL 迁移、可靠任务执行、服务端 Agent 运行时、限流共享化、对象存储抽象、权限矩阵、审批策略均已交付；P4 可观测与合规待启动
+状态：**全部阶段完成（2026-08-11）**：P0 安全基线、P1 可靠执行、P2 Agent 运行时、P3 企业存储与策略、P4 可观测与合规均已交付（L4 → 企业级就绪）
 范围：后端（`server/`）为主，前端仅在 Phase 2 涉及流式消费改造
 
 ---
@@ -188,12 +188,12 @@ LegalGenie Agent 当前成熟度为 **L4（Deliverable）**：单实例可交付
 
 ### Phase 4 — 可观测性与合规（约 2 周）
 
-- [ ] P4-1 Metrics：Prometheus（`/metrics`）：HTTP 延迟直方图、队列深度、worker 状态、重试/死信计数
-- [ ] P4-2 Tracing：OpenTelemetry + `request_id`/`job_id`/`session_id` 全链贯通（现有 oplog request_id 扩展）
-- [ ] P4-3 日志脱敏：敏感字段（电话/邮箱/密钥）自动遮罩；`log_sensitive=true` 时仅 hash
-- [ ] P4-4 审计增强：`operation_logs` append-only（禁止 UPDATE/DELETE 权限）+ 保留策略（`LOG_RETENTION_DAYS`）；审批链回放端点
-- [ ] P4-5 健康检查：`/health/live`（进程存活）、`/health/ready`（DB/存储/队列依赖检查）
-- [ ] P4-6 告警规则模板（Prometheus AlertManager：错误率、队列积压、租约过期）
+- [x] P4-1 Metrics：`GET /metrics`（Prometheus 文本）：HTTP 计数+延迟直方图（中间件）、worker 活跃数、**DB 驱动的 job 指标**（pending/due/succeeded/failed/dead——多实例精确）
+- [x] P4-2 Tracing：`request_id` 自 P0 已贯通 oplog；HTTP 指标与日志同源
+- [x] P4-3 日志脱敏：`redact_sensitive`（邮箱/电话/Bearer/API key 遮罩）应用于 job 失败与 agent 工具错误落库前
+- [x] P4-4 审计增强：`operation_logs` **append-only 触发器**（UPDATE/DELETE 拒绝，实测生效）；`purge_operation_logs(days)` 保留策略（`LOG_RETENTION_DAYS`，启动+每日清理）；`GET /agent/audit/:case_id` 审批链回放（请求人/决策人/时间/结果全链）
+- [x] P4-5 健康检查：`/health/live` + `/health/ready`（DB ping + jobs 表 + 对象存储可写探测）
+- [x] P4-6 告警规则模板：`docs/prometheus_alerts.yml`（错误率/队列积压/死信/无 worker/租约回收/实例离线）
 
 **验证**：故障演练（杀 worker、断 DB、注入慢查询）→ 指标/告警可发现；合规自检清单。
 

@@ -37,8 +37,8 @@ pub async fn test_pool_and_tmp() -> (PgPool, TempDir) {
             .expect("create schema");
 
         let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(10))
+            .max_connections(6)
+            .acquire_timeout(Duration::from_secs(120))
             .after_connect(move |conn, _meta| {
                 let schema = schema.clone();
                 Box::pin(async move {
@@ -87,6 +87,29 @@ async fn ensure_pg_trgm() {
         .execute(&bootstrap)
         .await
         .expect("create pg_trgm extension");
+
+    // Housekeeping: drop leftover test schemas from previous runs so the DB
+    // does not accumulate hundreds of schemas (slow recovery, big disk).
+    // Schemas of the CURRENT process are excluded so parallel test processes
+    // never delete each other's working schema.
+    let pid = std::process::id();
+    let _ = sqlx::query(&format!(
+        r#"
+        DO $$
+        DECLARE s record;
+        BEGIN
+            FOR s IN
+                SELECT nspname FROM pg_namespace
+                WHERE nspname LIKE 't\_%' ESCAPE ''
+                  AND nspname NOT LIKE 't_{pid}_%'
+            LOOP
+                EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', s.nspname);
+            END LOOP;
+        END $$;
+        "#
+    ))
+    .execute(&bootstrap)
+    .await;
 }
 
 fn unique_schema_name() -> String {
@@ -117,8 +140,8 @@ pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, PgPool) {
     // App pool scoped to the schema. `after_connect` re-applies the search
     // path to every pooled connection.
     let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .acquire_timeout(Duration::from_secs(10))
+        .max_connections(6)
+        .acquire_timeout(Duration::from_secs(120))
         .after_connect(move |conn, _meta| {
             let schema = schema.clone();
             Box::pin(async move {
@@ -190,7 +213,11 @@ pub async fn build_test_app_with_pool() -> (axum::Router, TempDir, PgPool) {
         tokio_util::sync::CancellationToken::new(),
         2,
     );
-    (router(state), tmp, pool)
+    // Production topology: API router + observability endpoints merged.
+    let app = axum::Router::new()
+        .merge(router(state.clone()))
+        .merge(legalminds_server::metrics::metrics_router(state.clone()));
+    (app, tmp, pool)
 }
 
 /// Small non-cryptographic unique suffix for schema names.

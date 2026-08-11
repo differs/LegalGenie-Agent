@@ -55,6 +55,10 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             crate::idempotency::idempotency_middleware,
         ))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::metrics::metrics_middleware,
+        ))
 }
 
 fn cors_layer(state: &AppState) -> CorsLayer {

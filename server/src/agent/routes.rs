@@ -30,6 +30,71 @@ pub fn router() -> Router<AppState> {
         .route("/approvals/pending", get(list_pending_approvals))
         .route("/approvals/:id/confirm", post(confirm_approval))
         .route("/approvals/:id/reject", post(reject_approval))
+        .route("/audit/:case_id", get(case_audit_trail))
+}
+
+/// Audit replay (P4): full tool-call trail for a case — who requested, who
+/// decided, when, and the result. Read-only and access-scoped.
+async fn case_audit_trail(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(case_id): Path<String>,
+) -> AppResult<Json<ApiEnvelope<Value>>> {
+    let case_id = normalize_uuid(&case_id, "invalid case_id")?;
+    crate::access::ensure_case_access(&state.pool, user.user_id, &case_id).await?;
+
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT
+            tc.id, tc.tool_name, tc.input, tc.output, tc.error,
+            tc.status, tc.danger_level,
+            u1.username AS requested_by,
+            u2.username AS decided_by
+        FROM agent_tool_calls tc
+        JOIN agent_sessions s ON s.id = tc.session_id
+        LEFT JOIN users u1 ON u1.id = tc.requested_by
+        LEFT JOIN users u2 ON u2.id = tc.decided_by
+        WHERE s.case_id = $1
+        ORDER BY tc.created_at ASC
+        "#,
+    )
+    .bind(&case_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| AppError::internal(format!("db error: {e}")))?;
+
+    let trail: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(id, tool, input, output, error, status, danger, requested_by, decided_by)| {
+                json!({
+                    "id": id,
+                    "tool": tool,
+                    "input": serde_json::from_str::<Value>(&input).unwrap_or(Value::Null),
+                    "output": output.map(|o| serde_json::from_str::<Value>(&o).unwrap_or(Value::Null)),
+                    "error": error,
+                    "status": status,
+                    "danger_level": danger,
+                    "requested_by": requested_by,
+                    "decided_by": decided_by,
+                })
+            },
+        )
+        .collect();
+
+    Ok(Json(ApiEnvelope::ok(
+        json!({ "case_id": case_id, "tool_calls": trail }),
+    )))
 }
 
 // ---------- Sessions ----------
@@ -493,8 +558,9 @@ async fn execute_approval(
             }))))
         }
         Err(err) => {
+            let redacted = crate::config::redact_sensitive(&err.to_string());
             sqlx::query("UPDATE agent_tool_calls SET status = 'failed', error = $1 WHERE id = $2")
-                .bind(err.to_string())
+                .bind(redacted)
                 .bind(&approval_id)
                 .execute(&state.pool)
                 .await

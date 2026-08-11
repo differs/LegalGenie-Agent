@@ -1,4 +1,5 @@
 use crate::config::{AppConfig, TranslationConfig};
+use crate::metrics::Metrics;
 use crate::rate_limit::RateLimiter;
 use crate::store::{LocalObjectStore, ObjectStore};
 use crate::translation::{self, TranslationProvider};
@@ -13,6 +14,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub rate_limiter: Arc<RateLimiter>,
     pub store: Arc<dyn ObjectStore>,
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -59,6 +61,7 @@ impl AppState {
             pool,
             rate_limiter: limiter,
             store,
+            metrics: Metrics::new(),
         }
     }
 }

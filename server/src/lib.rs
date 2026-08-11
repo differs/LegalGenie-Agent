@@ -9,6 +9,7 @@ mod file_security;
 mod idempotency;
 pub mod job_worker;
 pub mod jobs;
+pub mod metrics;
 mod oplog;
 pub mod parser;
 pub mod rate_limit;

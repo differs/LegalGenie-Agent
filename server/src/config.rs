@@ -234,6 +234,49 @@ pub fn redact_secret(text: &str, secret: &str) -> String {
     text.replace(secret, "[REDACTED]")
 }
 
+/// Masks sensitive patterns (emails, phone numbers, bearer tokens, api keys)
+/// in free-form log/error text. Keeps audits readable while protecting PII.
+pub fn redact_sensitive(text: &str) -> String {
+    let mut out = text.to_string();
+    // emails: user@host -> u***@host
+    out = regex_replace(
+        &out,
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        |m| {
+            let at = m.find('@').unwrap_or(0);
+            let (local, domain) = m.split_at(at);
+            let masked_local = if local.len() > 1 {
+                format!("{}***", &local[..1])
+            } else {
+                "***".to_string()
+            };
+            format!("{masked_local}{domain}")
+        },
+    );
+    // bearer tokens
+    out = regex_replace(&out, r"(?i)bearer [A-Za-z0-9._-]{8,}", |m| {
+        let head = &m[..m.len().min(12)];
+        format!("{head}...[REDACTED]")
+    });
+    // long api keys / secrets (16+ chars of word chars or dashes)
+    out = regex_replace(
+        &out,
+        r"(?i)(sk-[A-Za-z0-9_-]{8,}|api[_-]?key[']?\s*[:=]\s*[A-Za-z0-9_-]{8,})",
+        |_| "[REDACTED]".to_string(),
+    );
+    out
+}
+
+fn regex_replace(text: &str, pattern: &str, f: impl Fn(&str) -> String) -> String {
+    let regex = match regex::Regex::new(pattern) {
+        Ok(r) => r,
+        Err(_) => return text.to_string(),
+    };
+    regex
+        .replace_all(text, |caps: &regex::Captures<'_>| f(&caps[0]))
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +286,14 @@ mod tests {
         let out = redact_secret("request with key sk-abc12345 tail", "sk-abc12345");
         assert_eq!(out, "request with key [REDACTED] tail");
         assert!(!out.contains("sk-abc12345"));
+    }
+
+    #[test]
+    fn redact_sensitive_masks_pii() {
+        let out = redact_sensitive("contact a@example.com or 13800138000 sk-live-abcdef123456");
+        assert!(!out.contains("a@example.com"));
+        assert!(!out.contains("sk-live"));
+        assert!(out.contains("@example.com"), "domain kept: {out}");
     }
 
     #[test]

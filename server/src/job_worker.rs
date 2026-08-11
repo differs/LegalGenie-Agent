@@ -35,9 +35,11 @@ pub fn spawn_job_workers(
 }
 
 async fn worker_loop(state: AppState, shutdown: CancellationToken, worker_id: usize) {
+    state.metrics.worker_started();
     let mut cycle: u32 = 0;
     loop {
         if shutdown.is_cancelled() {
+            state.metrics.worker_stopped();
             tracing::info!(worker_id, "worker stopping (shutdown requested)");
             break;
         }
@@ -120,7 +122,7 @@ async fn run_job(state: &AppState, job: Job, shutdown: CancellationToken) -> any
             tracing::info!(job_id = %job.id, kind = %job.kind.as_str(), "job succeeded");
         }
         Err(err) => {
-            let message = format!("{err:#}");
+            let message = crate::config::redact_sensitive(&format!("{err:#}"));
             jobs::fail_job(&state.pool, &job.id, &message).await?;
             jobs::record_job_event(
                 &state.pool,
